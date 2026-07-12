@@ -1,0 +1,116 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+packages:
+  - ca-certificates
+  - cifs-utils
+  - curl
+  - fail2ban
+  - git
+  - jq
+  - unattended-upgrades
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/60-codex-hardening.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      PubkeyAuthentication yes
+      AuthenticationMethods publickey
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitEmptyPasswords no
+      PermitRootLogin no
+      AllowUsers ${admin_username}
+      MaxAuthTries 3
+      LoginGraceTime 30
+      MaxStartups 10:30:60
+      X11Forwarding no
+      GatewayPorts no
+      PermitTunnel no
+      AllowTcpForwarding yes
+
+  - path: /etc/fail2ban/jail.d/sshd.local
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [sshd]
+      enabled = true
+      backend = systemd
+      port = 22
+      maxretry = 5
+      findtime = 10m
+      bantime = 1h
+
+  - path: /usr/local/sbin/bootstrap-codex-on-vm
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      ADMIN_USER="${admin_username}"
+      MOUNT_PATH="${workspace_mount_path}"
+      STORAGE_ACCOUNT_ID="${storage_account_id}"
+      STORAGE_ACCOUNT_NAME="${storage_account_name}"
+      FILE_SHARE_NAME="${file_share_name}"
+      SMB_HOST="$STORAGE_ACCOUNT_NAME.file.core.windows.net"
+      SMB_PATH="//$SMB_HOST/$FILE_SHARE_NAME"
+      CREDENTIAL_ROOT="/etc/smbcredentials"
+      CREDENTIAL_FILE="$CREDENTIAL_ROOT/$STORAGE_ACCOUNT_NAME.cred"
+
+      curl -fsSL https://chatgpt.com/codex/install.sh \
+        | env CODEX_HOME=/opt/codex CODEX_INSTALL_DIR=/usr/local/bin CODEX_NON_INTERACTIVE=1 sh
+      command -v codex >/dev/null
+      codex --version
+
+      STORAGE_KEY=""
+      for attempt in $(seq 1 60); do
+        ACCESS_TOKEN="$(curl -fsS -H Metadata:true \
+          'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F' \
+          | jq -r '.access_token')"
+        KEY_RESPONSE="$(curl -fsS -X POST \
+          -H "Authorization: Bearer $ACCESS_TOKEN" \
+          -H 'Content-Length: 0' \
+          "https://management.azure.com$STORAGE_ACCOUNT_ID/listKeys?api-version=2023-05-01" || true)"
+        STORAGE_KEY="$(printf '%s' "$KEY_RESPONSE" | jq -r '.keys[]? | select(.keyName == "key1") | .value' | head -n 1)"
+        if [[ -n "$STORAGE_KEY" && "$STORAGE_KEY" != "null" ]]; then
+          break
+        fi
+        sleep 10
+      done
+      [[ -n "$STORAGE_KEY" && "$STORAGE_KEY" != "null" ]]
+
+      install -d -m 0700 "$CREDENTIAL_ROOT"
+      install -m 0600 /dev/null "$CREDENTIAL_FILE"
+      printf 'username=%s\npassword=%s\n' "$STORAGE_ACCOUNT_NAME" "$STORAGE_KEY" >"$CREDENTIAL_FILE"
+      unset STORAGE_KEY KEY_RESPONSE ACCESS_TOKEN
+
+      install -d -m 0770 "$MOUNT_PATH"
+      USER_UID="$(id -u "$ADMIN_USER")"
+      USER_GID="$(id -g "$ADMIN_USER")"
+      MOUNT_OPTIONS="_netdev,nofail,vers=3.1.1,credentials=$CREDENTIAL_FILE,serverino,nosharesock,actimeo=30,mfsymlinks,uid=$USER_UID,gid=$USER_GID,dir_mode=0770,file_mode=0660"
+      FSTAB_ENTRY="$SMB_PATH $MOUNT_PATH cifs $MOUNT_OPTIONS 0 0"
+      if ! grep -Fq "$SMB_PATH $MOUNT_PATH cifs " /etc/fstab; then
+        printf '%s\n' "$FSTAB_ENTRY" >>/etc/fstab
+      fi
+
+      if ! mountpoint -q "$MOUNT_PATH"; then
+        mount "$MOUNT_PATH" || mount -a
+      fi
+      [[ "$(findmnt -n -o FSTYPE "$MOUNT_PATH")" == "cifs" ]]
+      [[ "$(findmnt -n -o SOURCE "$MOUNT_PATH")" == "$SMB_PATH" ]]
+      test -w "$MOUNT_PATH"
+
+      install -d -m 0755 /var/lib/codex-on-vm
+      touch /var/lib/codex-on-vm/bootstrap-ready
+
+runcmd:
+  - [sshd, -t]
+  - [systemctl, reload, ssh]
+  - [systemctl, enable, --now, fail2ban]
+  - [systemctl, enable, --now, unattended-upgrades]
+  - [bash, /usr/local/sbin/bootstrap-codex-on-vm]
+
+final_message: "Codex on VM bootstrap complete after $UPTIME seconds"
