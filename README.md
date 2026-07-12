@@ -1,10 +1,16 @@
 ![Codex on a cloud VM](image.png)
 
-# codex-on-vm
+# Codex on a VM
 
-This repository creates an always-available Codex development machine in Azure. Mac and mobile connect directly through hardened, public key-only SSH, while Azure Files keeps `/workspace` persistent.
+This repository creates an always-available development machine for Codex in Azure. You can connect to the same machine from a Mac or mobile device over public key-only SSH and continue working in the same `/workspace` directory.
 
-Terraform automatically creates separate local Ed25519 keypairs for Mac and mobile when they do not already exist. Private keys stay as mode-`0600` files under `~/.ssh` and are never stored in Terraform state.
+## Why run Codex on a VM?
+
+Use this when you want one development environment that is reachable from more than one device. Repositories and tools stay on the VM, so switching between Mac and mobile does not require copying a checkout or recreating the setup on each device. The VM must be running and incurs Azure usage costs.
+
+The workspace is stored on Azure Files rather than only on the VM disk. This keeps project files available if the VM is replaced and also lets you mount the same workspace on your Mac when you want to use local tools.
+
+Terraform creates the Azure VM, network, persistent file share, separate Mac and mobile SSH access, and local SSH configuration.
 
 ## 1. Configure
 
