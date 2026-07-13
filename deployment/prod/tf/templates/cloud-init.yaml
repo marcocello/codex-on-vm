@@ -12,6 +12,18 @@ packages:
   - unattended-upgrades
 
 write_files:
+  - path: /usr/local/sbin/fetch-verified-artifact
+    owner: root:root
+    permissions: "0755"
+    content: |
+      ${indent(6, verified_fetch_script)}
+
+  - path: /usr/local/sbin/install-verified-codex
+    owner: root:root
+    permissions: "0755"
+    content: |
+      ${indent(6, codex_installer_script)}
+
   - path: /etc/ssh/sshd_config.d/60-codex-hardening.conf
     owner: root:root
     permissions: "0644"
@@ -52,45 +64,55 @@ write_files:
 
       ADMIN_USER="${admin_username}"
       MOUNT_PATH="${workspace_mount_path}"
-      STORAGE_ACCOUNT_ID="${storage_account_id}"
       STORAGE_ACCOUNT_NAME="${storage_account_name}"
+      STORAGE_IDENTITY_CLIENT_ID="${storage_identity_client_id}"
       FILE_SHARE_NAME="${file_share_name}"
+      CODEX_VERSION="${codex_version}"
+      CODEX_PACKAGE_URL="${codex_package_url}"
+      CODEX_PACKAGE_SHA256="${codex_package_sha256}"
+      MICROSOFT_REPO_URL="${microsoft_repo_url}"
+      MICROSOFT_REPO_SHA256="${microsoft_repo_sha256}"
+      AZFILESAUTH_VERSION="${azfilesauth_version}"
       SMB_HOST="$STORAGE_ACCOUNT_NAME.file.core.windows.net"
       SMB_PATH="//$SMB_HOST/$FILE_SHARE_NAME"
-      CREDENTIAL_ROOT="/etc/smbcredentials"
-      CREDENTIAL_FILE="$CREDENTIAL_ROOT/$STORAGE_ACCOUNT_NAME.cred"
 
-      curl -fsSL https://chatgpt.com/codex/install.sh \
-        | env CODEX_HOME=/opt/codex CODEX_INSTALL_DIR=/usr/local/bin CODEX_NON_INTERACTIVE=1 sh
+      /usr/local/sbin/install-verified-codex \
+        "$CODEX_PACKAGE_URL" \
+        "$CODEX_PACKAGE_SHA256" \
+        "$CODEX_VERSION" \
+        /opt/codex \
+        /usr/local/bin \
+        /usr/local/sbin/fetch-verified-artifact
       command -v codex >/dev/null
-      codex --version
+      [[ "$(codex --version | awk '{print $NF}')" == "$CODEX_VERSION" ]]
 
-      STORAGE_KEY=""
-      for attempt in $(seq 1 60); do
-        ACCESS_TOKEN="$(curl -fsS -H Metadata:true \
-          'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F' \
-          | jq -r '.access_token')"
-        KEY_RESPONSE="$(curl -fsS -X POST \
-          -H "Authorization: Bearer $ACCESS_TOKEN" \
-          -H 'Content-Length: 0' \
-          "https://management.azure.com$STORAGE_ACCOUNT_ID/listKeys?api-version=2023-05-01" || true)"
-        STORAGE_KEY="$(printf '%s' "$KEY_RESPONSE" | jq -r '.keys[]? | select(.keyName == "key1") | .value' | head -n 1)"
-        if [[ -n "$STORAGE_KEY" && "$STORAGE_KEY" != "null" ]]; then
-          break
-        fi
-        sleep 10
-      done
-      [[ -n "$STORAGE_KEY" && "$STORAGE_KEY" != "null" ]]
+      REPO_PACKAGE=/tmp/packages-microsoft-prod.deb
+      /usr/local/sbin/fetch-verified-artifact "$MICROSOFT_REPO_URL" "$MICROSOFT_REPO_SHA256" "$REPO_PACKAGE"
+      dpkg -i "$REPO_PACKAGE"
+      rm -f "$REPO_PACKAGE"
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y "azfilesauth=${azfilesauth_version}"
+      apt-mark hold azfilesauth
 
-      install -d -m 0700 "$CREDENTIAL_ROOT"
-      install -m 0600 /dev/null "$CREDENTIAL_FILE"
-      printf 'username=%s\npassword=%s\n' "$STORAGE_ACCOUNT_NAME" "$STORAGE_KEY" >"$CREDENTIAL_FILE"
-      unset STORAGE_KEY KEY_RESPONSE ACCESS_TOKEN
+      if ! getent passwd azfilesuser >/dev/null; then
+        useradd --system --create-home --home-dir /var/lib/azfilesauth --shell /usr/sbin/nologin azfilesuser
+      fi
+      AUTH_UID="$(id -u azfilesuser)"
+      install -d -o azfilesuser -g azfilesuser -m 0700 /var/lib/azfilesauth
+      install -d -m 0755 /etc/azfilesauth
+      printf 'USER_UID: %s\n' "$AUTH_UID" >/etc/azfilesauth/config.yaml
+      chown root:root /etc/azfilesauth/config.yaml
+      chmod 0644 /etc/azfilesauth/config.yaml
+
+      systemctl daemon-reload
+      systemctl enable azfilesauth-bootstrap.service azfilesrefresh.service
+      systemctl start azfilesauth-bootstrap.service
+      systemctl start azfilesrefresh.service
 
       install -d -m 0770 "$MOUNT_PATH"
       USER_UID="$(id -u "$ADMIN_USER")"
       USER_GID="$(id -g "$ADMIN_USER")"
-      MOUNT_OPTIONS="_netdev,nofail,vers=3.1.1,credentials=$CREDENTIAL_FILE,serverino,nosharesock,actimeo=30,mfsymlinks,uid=$USER_UID,gid=$USER_GID,dir_mode=0770,file_mode=0660"
+      MOUNT_OPTIONS="_netdev,nofail,vers=3.1.1,sec=krb5,cruid=$AUTH_UID,username=$STORAGE_IDENTITY_CLIENT_ID,serverino,nosharesock,actimeo=30,mfsymlinks,uid=$USER_UID,gid=$USER_GID,dir_mode=0770,file_mode=0660,x-systemd.requires=azfilesauth-bootstrap.service,x-systemd.after=azfilesauth-bootstrap.service"
       FSTAB_ENTRY="$SMB_PATH $MOUNT_PATH cifs $MOUNT_OPTIONS 0 0"
       if ! grep -Fq "$SMB_PATH $MOUNT_PATH cifs " /etc/fstab; then
         printf '%s\n' "$FSTAB_ENTRY" >>/etc/fstab
@@ -105,6 +127,42 @@ write_files:
 
       install -d -m 0755 /var/lib/codex-on-vm
       touch /var/lib/codex-on-vm/bootstrap-ready
+
+  - path: /usr/local/sbin/prepare-azure-files-auth
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      ENDPOINT="https://${storage_account_name}.file.core.windows.net"
+      CLIENT_ID="${storage_identity_client_id}"
+      for attempt in $(seq 1 60); do
+        if azfilesauthmanager set "$ENDPOINT" --imds-client-id "$CLIENT_ID"; then
+          azfilesauthmanager list
+          exit 0
+        fi
+        sleep 10
+      done
+      exit 1
+
+  - path: /etc/systemd/system/azfilesauth-bootstrap.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Prepare Azure Files managed-identity credentials
+      Wants=network-online.target
+      After=network-online.target
+      Before=remote-fs-pre.target azfilesrefresh.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/prepare-azure-files-auth
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
 
 runcmd:
   - [sshd, -t]

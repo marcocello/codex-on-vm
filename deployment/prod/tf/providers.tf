@@ -14,6 +14,10 @@ terraform {
       source  = "hashicorp/external"
       version = "~> 2.0"
     }
+    azapi = {
+      source  = "Azure/azapi"
+      version = "~> 2.0"
+    }
   }
 }
 
@@ -25,4 +29,7 @@ provider "azurerm" {
   }
 
   subscription_id = var.subscription_id
+}
+
+provider "azapi" {
 }

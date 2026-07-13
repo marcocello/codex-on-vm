@@ -2,24 +2,48 @@
 set -euo pipefail
 
 STATE_FILE="${CODEX_SMB_STATE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/codex-on-vm/smb-access.json}"
+LOCK_DIR="${STATE_FILE}.lock"
+LOCK_HELD=0
 
 fail() {
   printf 'SMB close failed: %s\n' "$1" >&2
-  exit 1
+  return 1
 }
 
-for command in az python3 diskutil; do
+fingerprint() {
+  shasum -a 256 | awk '{print $1}'
+}
+
+cleanup_on_exit() {
+  local status=$?
+  pbcopy </dev/null 2>/dev/null || true
+  if [[ "$LOCK_HELD" == "1" ]]; then
+    rmdir "$LOCK_DIR" >/dev/null 2>&1 || true
+  fi
+  return "$status"
+}
+
+trap cleanup_on_exit EXIT
+trap 'exit 130' INT TERM
+
+for command in az python3 diskutil pbcopy shasum awk; do
   command -v "$command" >/dev/null || fail "missing required command: $command"
 done
+
+install -d -m 0700 "$(dirname "$STATE_FILE")"
+if ! mkdir "$LOCK_DIR"; then
+  fail "another SMB lifecycle operation is already running"
+fi
+LOCK_HELD=1
 [[ -f "$STATE_FILE" ]] || fail "no SMB access session is recorded"
 
-IFS=$'\t' read -r RESOURCE_GROUP STORAGE_ACCOUNT PUBLIC_IP MOUNT_PATH <<<"$(STATE_FILE="$STATE_FILE" python3 - <<'PY'
+IFS=$'\t' read -r RESOURCE_GROUP STORAGE_ACCOUNT PUBLIC_IP MOUNT_PATH KEY2_FINGERPRINT <<<"$(STATE_FILE="$STATE_FILE" python3 - <<'PY'
 import json
 import os
 
 with open(os.environ["STATE_FILE"], encoding="utf-8") as handle:
     value = json.load(handle)
-print("\t".join(value[key] for key in ("resource_group", "storage_account", "public_ip", "mount_path")))
+print("\t".join(value.get(key, "") for key in ("resource_group", "storage_account", "public_ip", "mount_path", "key2_fingerprint")))
 PY
 )"
 
@@ -40,5 +64,17 @@ for _attempt in {1..30}; do
 done
 [[ "$RULE_COUNT" == "0" ]] || fail "temporary storage firewall rule is still present"
 
+NEW_KEY="$(az storage account keys renew \
+  --resource-group "$RESOURCE_GROUP" \
+  --account-name "$STORAGE_ACCOUNT" \
+  --key key2 \
+  --query "[?keyName=='key2'].value | [0]" \
+  --output tsv \
+  --only-show-errors)" || fail "could not rotate Storage key2; recovery state was retained"
+[[ -n "$NEW_KEY" ]] || fail "Storage key2 rotation returned no key; recovery state was retained"
+NEW_FINGERPRINT="$(printf '%s' "$NEW_KEY" | fingerprint)"
+unset NEW_KEY
+[[ -z "$KEY2_FINGERPRINT" || "$NEW_FINGERPRINT" != "$KEY2_FINGERPRINT" ]] || fail "Storage key2 did not change; recovery state was retained"
+
 rm -f "$STATE_FILE"
-printf 'SMB unmounted and temporary storage firewall rule removed.\n'
+printf 'SMB unmounted, temporary firewall rule removed, and Storage key2 rotated.\n'

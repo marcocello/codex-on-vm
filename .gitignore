@@ -16,7 +16,9 @@
 !*hcl.example
 !*tfvars.example
 
-
 # 4. Block specific directories and files
 .git/
 **/.terraform
+
+# Local security register
+README.private.md

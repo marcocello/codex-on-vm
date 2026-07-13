@@ -12,6 +12,8 @@ The workspace is stored on Azure Files rather than only on the VM disk. This kee
 
 Terraform creates the Azure VM, network, persistent file share, separate Mac and mobile SSH access, and local SSH configuration.
 
+The VM image and direct provisioning artifacts are version-pinned. Codex and the Microsoft repository bootstrap package are SHA-256 verified before root installation; upgrades require an explicit repository change rather than following a mutable `latest` installer.
+
 ## 1. Configure
 
 The ignored `deployment/prod/tf/terraform.tfvars` needs only:
@@ -79,13 +81,15 @@ Confirm the mobile host fingerprint matches the fingerprint verified through Azu
 From the repository root:
 
 ```bash
-scripts/smb-open
+scripts/smb-open.sh
 # Work in ~/Volumes/codex-on-vm
-scripts/smb-close
+scripts/smb-close.sh
 ```
 
-`smb-open` discovers the current Mac public IPv4, temporarily allows it in the Azure Storage firewall, copies Storage `key2` to the clipboard for the macOS password prompt, and mounts the share. `smb-close` unmounts it and removes that exact firewall rule.
+`smb-open.sh` discovers the current Mac public IPv4, temporarily allows it in the Azure Storage firewall, copies Storage `key2` to the clipboard for at most 60 seconds, clears the clipboard after the mount attempt, and mounts the share. `smb-close.sh` unmounts it, verifies removal of that exact firewall rule, and rotates `key2`; incomplete cleanup retains recovery state so the close command can be retried.
 
-The client IP is never stored in Terraform. The VM accesses the same share through its subnet using Storage `key1`. Outbound TCP 445 must be available for direct Mac SMB access.
+The client IP is never stored in Terraform. The VM accesses the same share through its subnet using its dedicated managed identity and SMB OAuth; it does not retrieve or store an account key. Direct Mac access continues to use Storage `key2`, and outbound TCP 445 must be available for that workflow.
+
+Terraform also configures 14-day file-share soft delete, a daily Azure Backup snapshot retained for 30 days, and a `CanNotDelete` lock on the storage account. A live restore drill is still required before treating the workspace as operationally recoverable.
 
 Never commit `terraform.tfvars`, `backend.hcl`, state files, private keys, screenshots, or generated proof evidence.
