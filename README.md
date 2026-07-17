@@ -2,30 +2,40 @@
 
 # Codex on a VM
 
-This repository creates an always-available development machine for Codex in Azure. You can connect to the same machine from a Mac or mobile device over public key-only SSH and continue working in the same `/workspace` directory.
+This repository creates an always-available Codex machine in Azure. The VM keeps your repositories and tools online, so your Mac does not need to stay awake.
 
-## Why run Codex on a VM?
+After setup, connect from another device through Codex Remote Control pairing. SSH is only opened temporarily for setup or maintenance and remains closed during normal use. Repositories live on a separate managed disk at `/workspace`.
 
-Use this when you want one development environment that is reachable from more than one device. Repositories and tools stay on the VM, so switching between Mac and mobile does not require copying a checkout or recreating the setup on each device. The VM must be running and incurs Azure usage costs.
+## What Terraform creates
 
-The workspace is stored on Azure Files rather than only on the VM disk. This keeps project files available if the VM is replaced and also lets you mount the same workspace on your Mac when you want to use local tools.
+- Ubuntu 24.04 VM with Codex installed for `azureadmin`.
+- No permanent inbound SSH rule.
+- 256 GiB persistent disk mounted at `/workspace`.
+- Daily backup with 30-day retention and deletion protection.
+- Local SSH configuration for the `codex-on-vm` alias.
 
-Terraform creates the Azure VM, network, persistent file share, separate Mac and mobile SSH access, and local SSH configuration.
+For the storage and security decisions, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-The VM image and direct provisioning artifacts are version-pinned. Codex and the Microsoft repository bootstrap package are SHA-256 verified before root installation; upgrades require an explicit repository change rather than following a mutable `latest` installer.
+## Deploy
 
-## 1. Configure
+You need Terraform 1.14+, Azure CLI, and an authenticated Azure session:
 
-The ignored `deployment/prod/tf/terraform.tfvars` needs only:
+```bash
+az login
+```
+
+Create the ignored `deployment/prod/tf/terraform.tfvars`:
 
 ```hcl
 subscription_id = "<azure-subscription-id>"
 owner           = "<owner-or-team>"
 ```
 
-Keep the existing ignored `backend.hcl` with your Azure state-backend coordinates.
+Keep your Azure state-backend settings in the ignored `deployment/prod/tf/backend.hcl`.
 
-## 2. Apply
+> If you are replacing the previous Azure Files deployment, back up the share first. This Terraform configuration does not migrate its data, and the new disk starts empty.
+
+Apply:
 
 ```bash
 cd deployment/prod/tf
@@ -34,62 +44,74 @@ terraform init \
   -reconfigure \
   -backend-config=backend.hcl
 
-terraform apply
+terraform plan -out=tfplan
+terraform apply tfplan
 ```
 
-During planning, Terraform ensures these local files exist:
+Review the plan before applying it. Azure resources create ongoing costs.
 
-```text
-~/.ssh/codex-on-vm-mac
-~/.ssh/codex-on-vm-mac.pub
-~/.ssh/codex-on-vm-mobile.pkcs8.pem
-~/.ssh/codex-on-vm-mobile.pkcs8.pem.pub
-```
+## First setup and device pairing
 
-Existing matching keypairs are preserved. `terraform apply` can create billable Azure resources and may replace the VM when SSH or cloud-init settings change, so review the plan before approving it.
-
-## 3. Connect from the Mac
-
-Verify the VM host-key fingerprint through Azure before adding it to `~/.ssh/known_hosts`. Terraform writes the SSH alias `codex-on-vm` to `~/.ssh/config.d/codex-on-vm.conf`.
+Open temporary SSH access for your current public IP, then connect to the VM:
 
 ```bash
+scripts/ssh-open.sh
 ssh codex-on-vm
 ```
 
-## 4. Use the persistent workspace
-
-The Azure file share is mounted on the VM at `/workspace`. Files and project folders that need to persist must be stored below this path.
-
-When creating a new project or selecting a folder in Codex, choose `/workspace` or create the project inside it, for example `/workspace/my-project`.
-
-## 5. Connect from mobile
-
-Import `~/.ssh/codex-on-vm-mobile.pkcs8.pem` into the mobile SSH connection. It is an Ed25519 PKCS#8 PEM file supported by the mobile importer. Do not send this private key through email, chat, Git, or cloud notes.
-
-Configure the mobile connection with:
-
-- Host: `ssh_fqdn` from `terraform output -json connection`
-- Port: `22`
-- User: `azureadmin`
-- Private key: the imported mobile key
-- Workspace: `/workspace`
-
-Confirm the mobile host fingerprint matches the fingerprint verified through Azure.
-
-## 6. Mount the workspace on the Mac
-
-From the repository root:
+On the VM:
 
 ```bash
-scripts/smb-open.sh
-# Work in ~/Volumes/codex-on-vm
-scripts/smb-close.sh
+cloud-init status --wait
+findmnt /workspace
+test -x ~/.codex/packages/standalone/current/codex
+codex login --device-auth
+codex remote-control start
+codex remote-control pair
 ```
 
-`smb-open.sh` discovers the current Mac public IPv4, temporarily allows it in the Azure Storage firewall, copies Storage `key2` to the clipboard for at most 60 seconds, clears the clipboard after the mount attempt, and mounts the share. `smb-close.sh` unmounts it, verifies removal of that exact firewall rule, and rotates `key2`; incomplete cleanup retains recovery state so the close command can be retried.
+Enter the short-lived pairing code on the other device using the same ChatGPT account. Then exit the VM and close SSH:
 
-The client IP is never stored in Terraform. The VM accesses the same share through its subnet using its dedicated managed identity and SMB OAuth; it does not retrieve or store an account key. Direct Mac access continues to use Storage `key2`, and outbound TCP 445 must be available for that workflow.
+```bash
+exit
+scripts/ssh-close.sh
+```
 
-Terraform also configures 14-day file-share soft delete, a daily Azure Backup snapshot retained for 30 days, and a `CanNotDelete` lock on the storage account. A live restore drill is still required before treating the workspace as operationally recoverable.
+From then on, use the paired device through Remote Control. Reopen SSH only when you need to configure, maintain, or recover the VM, and close it again when finished.
 
-Never commit `terraform.tfvars`, `backend.hcl`, state files, private keys, screenshots, or generated proof evidence.
+## Repositories
+
+Keep persistent repositories under `/workspace`:
+
+```bash
+cd /workspace
+git clone <repository-url>
+```
+
+The workspace disk survives VM replacement. Files stored elsewhere on the VM might not.
+
+## Mount `/workspace` on the Mac
+
+Install SSHFS once:
+
+```bash
+brew install --cask sshfs-mac
+```
+
+Mount and unmount from the repository root:
+
+```bash
+scripts/workspace-open.sh
+# Work in ~/Volumes/codex-on-vm
+scripts/workspace-close.sh
+```
+
+Use SSHFS for occasional local access. Run heavy Git and build operations on the VM, and avoid writing to the same working tree from both machines at once.
+
+## Access model
+
+There is no permanent inbound SSH rule. `scripts/ssh-open.sh` creates a temporary TCP/22 rule restricted to your current public IPv4 `/32`; `scripts/ssh-close.sh` removes the rule and verifies that the port is closed again.
+
+This is operator-controlled, JIT-style access with no automatic server-side expiry. Always run the close script when setup or maintenance is complete. Microsoft Defender JIT remains an optional paid upgrade.
+
+Never commit Terraform state, `terraform.tfvars`, `backend.hcl`, private keys, pairing codes, or credentials.

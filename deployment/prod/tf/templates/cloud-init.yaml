@@ -3,12 +3,14 @@ package_update: true
 package_upgrade: true
 
 packages:
+  - azure-vm-utils
   - ca-certificates
-  - cifs-utils
   - curl
+  - e2fsprogs
   - fail2ban
   - git
   - jq
+  - parted
   - unattended-upgrades
 
 write_files:
@@ -41,7 +43,7 @@ write_files:
       X11Forwarding no
       GatewayPorts no
       PermitTunnel no
-      AllowTcpForwarding yes
+      AllowTcpForwarding no
 
   - path: /etc/fail2ban/jail.d/sshd.local
     owner: root:root
@@ -64,105 +66,90 @@ write_files:
 
       ADMIN_USER="${admin_username}"
       MOUNT_PATH="${workspace_mount_path}"
-      STORAGE_ACCOUNT_NAME="${storage_account_name}"
-      STORAGE_IDENTITY_CLIENT_ID="${storage_identity_client_id}"
-      FILE_SHARE_NAME="${file_share_name}"
+      DATA_DISK="/dev/disk/azure/data/by-lun/${workspace_disk_lun}"
       CODEX_VERSION="${codex_version}"
       CODEX_PACKAGE_URL="${codex_package_url}"
       CODEX_PACKAGE_SHA256="${codex_package_sha256}"
-      MICROSOFT_REPO_URL="${microsoft_repo_url}"
-      MICROSOFT_REPO_SHA256="${microsoft_repo_sha256}"
-      AZFILESAUTH_VERSION="${azfilesauth_version}"
-      SMB_HOST="$STORAGE_ACCOUNT_NAME.file.core.windows.net"
-      SMB_PATH="//$SMB_HOST/$FILE_SHARE_NAME"
 
-      /usr/local/sbin/install-verified-codex \
-        "$CODEX_PACKAGE_URL" \
-        "$CODEX_PACKAGE_SHA256" \
-        "$CODEX_VERSION" \
-        /opt/codex \
-        /usr/local/bin \
-        /usr/local/sbin/fetch-verified-artifact
-      command -v codex >/dev/null
-      [[ "$(codex --version | awk '{print $NF}')" == "$CODEX_VERSION" ]]
+      ADMIN_HOME="$(getent passwd "$ADMIN_USER" | cut -d: -f6)"
+      [[ -d "$ADMIN_HOME" ]]
+      ADMIN_CODEX_HOME="$ADMIN_HOME/.codex"
+      ADMIN_BIN_DIR="$ADMIN_HOME/.local/bin"
+      MANAGED_CODEX="$ADMIN_CODEX_HOME/packages/standalone/current/codex"
+      install -d -o "$ADMIN_USER" -g "$ADMIN_USER" -m 0700 "$ADMIN_CODEX_HOME"
+      install -d -o "$ADMIN_USER" -g "$ADMIN_USER" -m 0755 "$ADMIN_HOME/.local" "$ADMIN_BIN_DIR"
 
-      REPO_PACKAGE=/tmp/packages-microsoft-prod.deb
-      /usr/local/sbin/fetch-verified-artifact "$MICROSOFT_REPO_URL" "$MICROSOFT_REPO_SHA256" "$REPO_PACKAGE"
-      dpkg -i "$REPO_PACKAGE"
-      rm -f "$REPO_PACKAGE"
-      apt-get update
-      DEBIAN_FRONTEND=noninteractive apt-get install -y "azfilesauth=${azfilesauth_version}"
-      apt-mark hold azfilesauth
+      runuser -u "$ADMIN_USER" -- env \
+        HOME="$ADMIN_HOME" \
+        CODEX_HOME="$ADMIN_CODEX_HOME" \
+        /usr/local/sbin/install-verified-codex \
+          "$CODEX_PACKAGE_URL" \
+          "$CODEX_PACKAGE_SHA256" \
+          "$CODEX_VERSION" \
+          "$ADMIN_CODEX_HOME" \
+          "$ADMIN_BIN_DIR" \
+          /usr/local/sbin/fetch-verified-artifact
+      [[ -x "$ADMIN_HOME/.codex/packages/standalone/current/codex" ]]
+      [[ "$(runuser -u "$ADMIN_USER" -- "$MANAGED_CODEX" --version | awk '{print $NF}')" == "$CODEX_VERSION" ]]
+      ln -sfn "$ADMIN_BIN_DIR/codex" /usr/local/bin/codex
+      [[ "$(runuser -u "$ADMIN_USER" -- /usr/local/bin/codex --version | awk '{print $NF}')" == "$CODEX_VERSION" ]]
 
-      if ! getent passwd azfilesuser >/dev/null; then
-        useradd --system --create-home --home-dir /var/lib/azfilesauth --shell /usr/sbin/nologin azfilesuser
+      for _attempt in $(seq 1 120); do
+        [[ -b "$DATA_DISK" ]] && break
+        sleep 5
+      done
+      [[ -b "$DATA_DISK" ]]
+
+      FILESYSTEM_DEVICE=""
+      CREATED_PARTITION=0
+      PARTITION="$(lsblk -nrpo NAME,TYPE "$DATA_DISK" | awk '$2 == "part" { print $1; exit }')"
+      if [[ -n "$PARTITION" ]]; then
+        FILESYSTEM_DEVICE="$PARTITION"
+      elif [[ -n "$(blkid -s TYPE -o value "$DATA_DISK" 2>/dev/null || true)" ]]; then
+        FILESYSTEM_DEVICE="$DATA_DISK"
+      else
+        [[ -z "$(wipefs --no-act "$DATA_DISK" 2>/dev/null)" ]]
+        parted "$DATA_DISK" --script mklabel gpt mkpart primary ext4 0% 100%
+        partprobe "$DATA_DISK"
+        udevadm settle
+        PARTITION="$(lsblk -nrpo NAME,TYPE "$DATA_DISK" | awk '$2 == "part" { print $1; exit }')"
+        [[ -b "$PARTITION" ]]
+        FILESYSTEM_DEVICE="$PARTITION"
+        CREATED_PARTITION=1
       fi
-      AUTH_UID="$(id -u azfilesuser)"
-      install -d -o azfilesuser -g azfilesuser -m 0700 /var/lib/azfilesauth
-      install -d -m 0755 /etc/azfilesauth
-      printf 'USER_UID: %s\n' "$AUTH_UID" >/etc/azfilesauth/config.yaml
-      chown root:root /etc/azfilesauth/config.yaml
-      chmod 0644 /etc/azfilesauth/config.yaml
+      [[ -b "$FILESYSTEM_DEVICE" ]]
 
-      systemctl daemon-reload
-      systemctl enable azfilesauth-bootstrap.service azfilesrefresh.service
-      systemctl start azfilesauth-bootstrap.service
-      systemctl start azfilesrefresh.service
-
-      install -d -m 0770 "$MOUNT_PATH"
-      USER_UID="$(id -u "$ADMIN_USER")"
-      USER_GID="$(id -g "$ADMIN_USER")"
-      MOUNT_OPTIONS="_netdev,nofail,vers=3.1.1,sec=krb5,cruid=$AUTH_UID,username=$STORAGE_IDENTITY_CLIENT_ID,serverino,nosharesock,actimeo=30,mfsymlinks,uid=$USER_UID,gid=$USER_GID,dir_mode=0770,file_mode=0660,x-systemd.requires=azfilesauth-bootstrap.service,x-systemd.after=azfilesauth-bootstrap.service"
-      FSTAB_ENTRY="$SMB_PATH $MOUNT_PATH cifs $MOUNT_OPTIONS 0 0"
-      if ! grep -Fq "$SMB_PATH $MOUNT_PATH cifs " /etc/fstab; then
-        printf '%s\n' "$FSTAB_ENTRY" >>/etc/fstab
+      FILESYSTEM_TYPE="$(blkid -s TYPE -o value "$FILESYSTEM_DEVICE" 2>/dev/null || true)"
+      if [[ -z "$FILESYSTEM_TYPE" ]]; then
+        [[ "$CREATED_PARTITION" == "1" ]]
+        mkfs.ext4 -L codex-workspace "$FILESYSTEM_DEVICE"
+        FILESYSTEM_TYPE=ext4
       fi
+      [[ "$FILESYSTEM_TYPE" == "ext4" ]]
+      FILESYSTEM_UUID="$(blkid -s UUID -o value "$FILESYSTEM_DEVICE")"
+      [[ -n "$FILESYSTEM_UUID" ]]
 
-      if ! mountpoint -q "$MOUNT_PATH"; then
-        mount "$MOUNT_PATH" || mount -a
+      install -d -o "$ADMIN_USER" -g "$ADMIN_USER" -m 0770 "$MOUNT_PATH"
+      sed -i "\\|[[:space:]]$MOUNT_PATH[[:space:]]|d" /etc/fstab
+      printf 'UUID=%s %s ext4 defaults,nofail,x-systemd.device-timeout=2min 0 2\n' "$FILESYSTEM_UUID" "$MOUNT_PATH" >>/etc/fstab
+      mountpoint -q "$MOUNT_PATH" || mount "$MOUNT_PATH"
+      [[ "$(findmnt -n -o FSTYPE "$MOUNT_PATH")" == "ext4" ]]
+      chown "$ADMIN_USER:$ADMIN_USER" "$MOUNT_PATH"
+      chmod 0770 "$MOUNT_PATH"
+
+      if ! runuser -u "$ADMIN_USER" -- env \
+        HOME="$ADMIN_HOME" \
+        CODEX_HOME="$ADMIN_CODEX_HOME" \
+        "$MANAGED_CODEX" app-server daemon bootstrap --remote-control; then
+        printf 'Remote Control bootstrap requires user authentication; installing the managed daemon without Remote Control.\n' >&2
+        runuser -u "$ADMIN_USER" -- env \
+          HOME="$ADMIN_HOME" \
+          CODEX_HOME="$ADMIN_CODEX_HOME" \
+          "$MANAGED_CODEX" app-server daemon bootstrap
       fi
-      [[ "$(findmnt -n -o FSTYPE "$MOUNT_PATH")" == "cifs" ]]
-      [[ "$(findmnt -n -o SOURCE "$MOUNT_PATH")" == "$SMB_PATH" ]]
-      test -w "$MOUNT_PATH"
 
       install -d -m 0755 /var/lib/codex-on-vm
       touch /var/lib/codex-on-vm/bootstrap-ready
-
-  - path: /usr/local/sbin/prepare-azure-files-auth
-    owner: root:root
-    permissions: "0755"
-    content: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-
-      ENDPOINT="https://${storage_account_name}.file.core.windows.net"
-      CLIENT_ID="${storage_identity_client_id}"
-      for attempt in $(seq 1 60); do
-        if azfilesauthmanager set "$ENDPOINT" --imds-client-id "$CLIENT_ID"; then
-          azfilesauthmanager list
-          exit 0
-        fi
-        sleep 10
-      done
-      exit 1
-
-  - path: /etc/systemd/system/azfilesauth-bootstrap.service
-    owner: root:root
-    permissions: "0644"
-    content: |
-      [Unit]
-      Description=Prepare Azure Files managed-identity credentials
-      Wants=network-online.target
-      After=network-online.target
-      Before=remote-fs-pre.target azfilesrefresh.service
-
-      [Service]
-      Type=oneshot
-      ExecStart=/usr/local/sbin/prepare-azure-files-auth
-      RemainAfterExit=yes
-
-      [Install]
-      WantedBy=multi-user.target
 
 runcmd:
   - [sshd, -t]
