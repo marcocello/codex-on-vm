@@ -20,7 +20,7 @@
 # 4. Block specific directories and files
 .git/
 **/.terraform
-docs/features/**/proof/**
+docs/features/**/proof/runs/**
 
 # Local security register
 README.private.md
