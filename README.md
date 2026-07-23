@@ -79,13 +79,13 @@ scripts/ssh-close.sh
 
 From then on, use the paired device through Remote Control. Reopen SSH only when you need to configure, maintain, or recover the VM, and close it again when finished.
 
-The VM restarts the managed daemon after reboot and checks it every minute. If Remote Control still disappears, recover it through Azure without opening SSH:
+The VM restarts the managed daemon after reboot and checks it every minute. If Remote Control still disappears, run this from the repository checkout on the Mac:
 
 ```bash
 scripts/remote-control-recover.sh
 ```
 
-Use temporary SSH only if Azure Run Command cannot recover the daemon.
+The command uses Azure Run Command without opening SSH. It verifies the checked-in VM recovery helper, installs it only when the VM copy differs, and then runs it; repeating the command does not rewrite an already matching helper. Use temporary SSH only if Azure Run Command cannot recover the daemon.
 
 ## Repositories
 

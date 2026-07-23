@@ -38,7 +38,11 @@ RULE_STATE="$TMP/rule"
 MOUNT_STATE="$TMP/mount-state"
 ACCESS_STATE="$TMP/access.json"
 MOUNT_PATH="$TMP/workspace"
-mkdir -p "$FAKE_BIN" "$MOUNT_PATH"
+REMOTE_HELPER_TARGET="$TMP/remote/usr/local/sbin/ensure-codex-remote-control"
+REMOTE_HELPER_OUTDATED="$TMP/outdated-ensure-codex-remote-control"
+REMOTE_INSTALL_COUNT="$TMP/remote-install-count"
+REMOTE_RECOVERY_COUNT="$TMP/remote-recovery-count"
+mkdir -p "$FAKE_BIN" "$MOUNT_PATH" "$(dirname "$REMOTE_HELPER_TARGET")"
 
 cat >"$FAKE_BIN/terraform" <<'EOF'
 #!/usr/bin/env bash
@@ -60,6 +64,57 @@ EOF
 cat >"$FAKE_BIN/az" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "$1" == "vm" && "$2" == "run-command" && "$3" == "invoke" ]]; then
+  shift 3
+  subscription=""
+  resource_group=""
+  vm_name=""
+  command_id=""
+  remote_script=""
+  only_show_errors=false
+  while (($#)); do
+    case "$1" in
+      --subscription)
+        subscription="$2"
+        shift 2
+        ;;
+      --resource-group)
+        resource_group="$2"
+        shift 2
+        ;;
+      --name)
+        vm_name="$2"
+        shift 2
+        ;;
+      --command-id)
+        command_id="$2"
+        shift 2
+        ;;
+      --scripts)
+        remote_script="$2"
+        shift 2
+        ;;
+      --only-show-errors)
+        only_show_errors=true
+        shift
+        ;;
+      *)
+        printf 'unexpected Run Command argument: %s\n' "$1" >&2
+        exit 2
+        ;;
+    esac
+  done
+  [[ "$subscription" == "00000000-0000-0000-0000-000000000000" ]]
+  [[ "$resource_group" == "prod-codex-on-vm-rg" ]]
+  [[ "$vm_name" == "prod-codex-on-vm-vm" ]]
+  [[ "$command_id" == "RunShellScript" ]]
+  [[ -n "$remote_script" && "$only_show_errors" == true ]]
+  printf 'az vm run-command invoke --subscription %s --resource-group %s --name %s --command-id %s --scripts <reconcile-payload> --only-show-errors\n' \
+    "$subscription" "$resource_group" "$vm_name" "$command_id" >>"$FAKE_CALL_LOG"
+  FAKE_REMOTE_CONTEXT=1 PATH="$FAKE_BIN:$PATH" /bin/sh -c "$remote_script"
+  printf '{"value":[{"code":"ProvisioningState/succeeded","message":"Remote Control recovery completed."}]}\n'
+  exit 0
+fi
 printf 'az %s\n' "$*" >>"$FAKE_CALL_LOG"
 if [[ "$*" == "account show --query id --output tsv" ]]; then
   printf '%s\n' "00000000-0000-0000-0000-000000000000"
@@ -159,11 +214,81 @@ else:
 PY
   exit 0
 fi
-if [[ "$*" == "vm run-command invoke "* ]]; then
-  printf '{"value":[{"code":"ProvisioningState/succeeded","message":"Remote Control recovery completed."}]}\n'
+exit 2
+EOF
+
+cat >"$FAKE_BIN/base64" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${FAKE_REMOTE_CONTEXT:-0}" == "1" ]]
+[[ "$#" == 1 && "$1" == "--decode" ]]
+python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read(), validate=True))'
+if [[ "${FAKE_REMOTE_CORRUPT_PAYLOAD:-0}" == "1" ]]; then
+  printf 'corrupted'
+fi
+printf 'remote base64 --decode\n' >>"$FAKE_CALL_LOG"
+EOF
+
+cat >"$FAKE_BIN/sha256sum" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${FAKE_REMOTE_CONTEXT:-0}" == "1" ]]
+[[ "$#" == 1 ]]
+python3 - "$1" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+print(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path}")
+PY
+printf 'remote sha256sum\n' >>"$FAKE_CALL_LOG"
+EOF
+
+cat >"$FAKE_BIN/cmp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${FAKE_REMOTE_CONTEXT:-0}" == "1" ]]
+[[ "$#" == 3 && "$1" == "-s" ]]
+source_path="$2"
+target_path="$3"
+[[ "$target_path" == "/usr/local/sbin/ensure-codex-remote-control" ]]
+/usr/bin/cmp -s "$source_path" "$FAKE_REMOTE_HELPER_TARGET"
+EOF
+
+cat >"$FAKE_BIN/install" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${FAKE_REMOTE_CONTEXT:-0}" == "1" && "$#" == 8 && "$1" == "-o" && "$2" == "root" && "$3" == "-g" && "$4" == "root" && "$5" == "-m" && "$6" == "0755" && "$8" == "/usr/local/sbin/ensure-codex-remote-control" ]]; then
+  /bin/cp "$7" "$FAKE_REMOTE_HELPER_TARGET"
+  /bin/chmod 0755 "$FAKE_REMOTE_HELPER_TARGET"
+  count=0
+  if [[ -f "$FAKE_REMOTE_INSTALL_COUNT" ]]; then
+    read -r count <"$FAKE_REMOTE_INSTALL_COUNT"
+  fi
+  printf '%s\n' "$((count + 1))" >"$FAKE_REMOTE_INSTALL_COUNT"
+  printf 'remote install %s\n' "$8" >>"$FAKE_CALL_LOG"
   exit 0
 fi
-exit 2
+if [[ "${FAKE_REMOTE_CONTEXT:-0}" == "1" || "$*" == *"/usr/local/sbin/ensure-codex-remote-control"* ]]; then
+  printf 'recovery install escaped or mismatched the Run Command boundary\n' >&2
+  exit 2
+fi
+exec /usr/bin/install "$@"
+EOF
+
+cat >"$FAKE_BIN/runuser" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${FAKE_REMOTE_CONTEXT:-0}" == "1" ]]
+[[ "$*" == "-u azureadmin -- env HOME=/home/azureadmin CODEX_HOME=/home/azureadmin/.codex /usr/local/sbin/ensure-codex-remote-control" ]]
+/usr/bin/cmp -s "$FAKE_EXPECTED_REMOTE_HELPER" "$FAKE_REMOTE_HELPER_TARGET"
+count=0
+if [[ -f "$FAKE_REMOTE_RECOVERY_COUNT" ]]; then
+  read -r count <"$FAKE_REMOTE_RECOVERY_COUNT"
+fi
+printf '%s\n' "$((count + 1))" >"$FAKE_REMOTE_RECOVERY_COUNT"
+printf 'remote runuser %s\n' "$*" >>"$FAKE_CALL_LOG"
 EOF
 
 cat >"$FAKE_BIN/ps" <<'EOF'
@@ -195,7 +320,7 @@ if [[ "$pid" == "22420" ]]; then
       if [[ "$FAKE_CODEX_MODE" == "mismatch_updater_args" ]]; then
         printf 'unrelated updater\n'
       else
-        printf '%s app-server daemon pid-update-loop\n' "$FAKE_MANAGED_CODEX"
+        printf '%s app-server daemon pid-update-loop\n' "$FAKE_RELEASE_CODEX"
       fi
       ;;
     *) exit 2 ;;
@@ -281,16 +406,32 @@ export FAKE_CALL_LOG="$CALL_LOG"
 export FAKE_RULE_STATE="$RULE_STATE"
 export FAKE_MOUNT_STATE="$MOUNT_STATE"
 export FAKE_MOUNT_PATH="$MOUNT_PATH"
+export FAKE_BIN
+export FAKE_REMOTE_HELPER_TARGET="$REMOTE_HELPER_TARGET"
+export FAKE_REMOTE_INSTALL_COUNT="$REMOTE_INSTALL_COUNT"
+export FAKE_REMOTE_RECOVERY_COUNT="$REMOTE_RECOVERY_COUNT"
+export FAKE_EXPECTED_REMOTE_HELPER="$TF_DIR/scripts/ensure-codex-remote-control.sh"
 export CODEX_SSH_STATE_FILE="$ACCESS_STATE"
 export CODEX_WORKSPACE_LOCAL_MOUNT_PATH="$MOUNT_PATH"
 
 DAEMON_HOME="$TMP/codex-home"
 MANAGED_CODEX="$DAEMON_HOME/packages/standalone/current/codex"
+RELEASE_CODEX="$DAEMON_HOME/packages/standalone/releases/0.145.0-x86_64-unknown-linux-musl/bin/codex"
+BACKUP_RELEASE_CODEX="$TMP/codex-home-backup/releases/0.145.0-x86_64-unknown-linux-musl/bin/codex"
+UNRELATED_CODEX="$TMP/unrelated-codex"
+FAKE_PROC_ROOT="$TMP/proc"
 DAEMON_STATE="$DAEMON_HOME/app-server-daemon"
 PARENT_TERMINATED="$TMP/parent-terminated"
 PAIRING_STATE="$DAEMON_HOME/remote-control/pairing-proof"
-mkdir -p "$(dirname "$MANAGED_CODEX")" "$DAEMON_STATE" "$(dirname "$PAIRING_STATE")"
-cat >"$MANAGED_CODEX" <<'EOF'
+mkdir -p \
+  "$(dirname "$RELEASE_CODEX")" \
+  "$(dirname "$BACKUP_RELEASE_CODEX")" \
+  "$FAKE_PROC_ROOT/22420" \
+  "$DAEMON_STATE" \
+  "$(dirname "$PAIRING_STATE")"
+ln -s "releases/0.145.0-x86_64-unknown-linux-musl/bin" \
+  "$DAEMON_HOME/packages/standalone/current"
+cat >"$RELEASE_CODEX" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'codex %s\n' "$*" >>"$FAKE_CALL_LOG"
@@ -305,12 +446,19 @@ if [[ "$*" == "app-server daemon restart" ]]; then
   exit 1
 fi
 if [[ "$*" == "app-server daemon version" ]]; then
-  printf '{"status":"running","managedCodexPath":"%s","appServerVersion":"0.144.6"}\n' "$0"
+  printf '{"status":"running","managedCodexPath":"%s","appServerVersion":"0.145.0"}\n' "$FAKE_RELEASE_CODEX"
   exit 0
 fi
 exit 2
 EOF
-chmod +x "$MANAGED_CODEX"
+chmod +x "$RELEASE_CODEX"
+cp "$RELEASE_CODEX" "$BACKUP_RELEASE_CODEX"
+cat >"$UNRELATED_CODEX" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$BACKUP_RELEASE_CODEX" "$UNRELATED_CODEX"
+ln -s "$BACKUP_RELEASE_CODEX" "$FAKE_PROC_ROOT/22420/exe"
 cat >"$DAEMON_STATE/app-server-updater.pid" <<'EOF'
 {"pid":22420,"processStartTime":"Fri Jul 17 07:49:19 2026"}
 EOF
@@ -322,9 +470,11 @@ printf 'proof-auth-state\n' >"$DAEMON_HOME/auth.json"
 printf 'proof-pairing-state\n' >"$PAIRING_STATE"
 
 export FAKE_MANAGED_CODEX="$MANAGED_CODEX"
+export FAKE_RELEASE_CODEX="$RELEASE_CODEX"
 export FAKE_PARENT_TERMINATED="$PARENT_TERMINATED"
 export FAKE_PROCESS_USER="$(id -un)"
 export CODEX_HOME="$DAEMON_HOME"
+export CODEX_RECOVERY_PROC_ROOT="$FAKE_PROC_ROOT"
 export CODEX_RECOVERY_PS="$FAKE_BIN/ps"
 export CODEX_RECOVERY_KILL="$FAKE_BIN/kill"
 export CODEX_RECOVERY_SLEEP="$FAKE_BIN/sleep"
@@ -364,12 +514,17 @@ for mismatch in \
   mismatch_updater_user \
   mismatch_updater_start \
   mismatch_updater_args \
+  mismatch_updater_executable \
   mismatch_app_user \
   mismatch_app_start \
   mismatch_app_stat \
   mismatch_app_parent; do
   : >"$CALL_LOG"
   rm -f "$PARENT_TERMINATED"
+  ln -sfn "$BACKUP_RELEASE_CODEX" "$FAKE_PROC_ROOT/22420/exe"
+  if [[ "$mismatch" == "mismatch_updater_executable" ]]; then
+    ln -sfn "$UNRELATED_CODEX" "$FAKE_PROC_ROOT/22420/exe"
+  fi
   if FAKE_CODEX_MODE="$mismatch" "$TF_DIR/scripts/ensure-codex-remote-control.sh"; then
     printf '%s must not be recovered automatically\n' "$mismatch" >&2
     exit 1
@@ -379,14 +534,58 @@ for mismatch in \
     exit 1
   fi
 done
+ln -sfn "$BACKUP_RELEASE_CODEX" "$FAKE_PROC_ROOT/22420/exe"
 [[ "$(cat "$DAEMON_STATE/settings.json")" == '{"remoteControlEnabled":true}' ]]
 [[ "$(cat "$DAEMON_HOME/auth.json")" == 'proof-auth-state' ]]
 [[ "$(cat "$PAIRING_STATE")" == 'proof-pairing-state' ]]
 
 : >"$CALL_LOG"
+printf '#!/usr/bin/env bash\nexit 99\n' >"$REMOTE_HELPER_OUTDATED"
+cp "$REMOTE_HELPER_OUTDATED" "$REMOTE_HELPER_TARGET"
+chmod 0755 "$REMOTE_HELPER_TARGET"
+rm -f "$REMOTE_INSTALL_COUNT" "$REMOTE_RECOVERY_COUNT"
+if FAKE_REMOTE_CORRUPT_PAYLOAD=1 "$ROOT/scripts/remote-control-recover.sh"; then
+  printf 'corrupted VM helper payload must fail before installation\n' >&2
+  exit 1
+fi
+if ! /usr/bin/cmp -s "$REMOTE_HELPER_OUTDATED" "$REMOTE_HELPER_TARGET"; then
+  printf 'checksum failure changed the outdated VM helper\n' >&2
+  exit 1
+fi
+if [[ -e "$REMOTE_INSTALL_COUNT" || -e "$REMOTE_RECOVERY_COUNT" ]]; then
+  printf 'checksum failure must not install or invoke the VM helper\n' >&2
+  exit 1
+fi
+rg -F 'remote sha256sum' "$CALL_LOG" >/dev/null
+if rg -F 'remote install ' "$CALL_LOG" >/dev/null || rg -F 'remote runuser ' "$CALL_LOG" >/dev/null; then
+  printf 'checksum failure crossed the install or recovery boundary\n' >&2
+  exit 1
+fi
+
+: >"$CALL_LOG"
 "$ROOT/scripts/remote-control-recover.sh"
-rg -F 'az vm run-command invoke --subscription 00000000-0000-0000-0000-000000000000 --resource-group prod-codex-on-vm-rg --name prod-codex-on-vm-vm --command-id RunShellScript' "$CALL_LOG" >/dev/null
-rg -F 'runuser -u azureadmin -- env HOME=/home/azureadmin CODEX_HOME=/home/azureadmin/.codex /usr/local/sbin/ensure-codex-remote-control' "$CALL_LOG" >/dev/null
+"$ROOT/scripts/remote-control-recover.sh"
+rg -F 'az vm run-command invoke --subscription 00000000-0000-0000-0000-000000000000 --resource-group prod-codex-on-vm-rg --name prod-codex-on-vm-vm --command-id RunShellScript --scripts <reconcile-payload> --only-show-errors' "$CALL_LOG" >/dev/null
+[[ "$(rg -c '^az vm run-command invoke ' "$CALL_LOG")" == "2" ]]
+/usr/bin/cmp -s "$TF_DIR/scripts/ensure-codex-remote-control.sh" "$REMOTE_HELPER_TARGET"
+[[ "$(cat "$REMOTE_INSTALL_COUNT")" == "1" ]]
+[[ "$(cat "$REMOTE_RECOVERY_COUNT")" == "2" ]]
+[[ "$(rg -c '^remote install ' "$CALL_LOG")" == "1" ]]
+[[ "$(rg -c '^remote runuser ' "$CALL_LOG")" == "2" ]]
+python3 - "$CALL_LOG" <<'PY'
+import pathlib
+import sys
+
+events = []
+for line in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if line.startswith("remote sha256sum"):
+        events.append("checksum")
+    elif line.startswith("remote install "):
+        events.append("install")
+    elif line.startswith("remote runuser "):
+        events.append("recovery")
+assert events == ["checksum", "install", "recovery", "checksum", "recovery"], events
+PY
 if rg -F 'network nsg rule create' "$CALL_LOG" >/dev/null; then
   printf 'Azure Run Command recovery must not open SSH\n' >&2
   exit 1

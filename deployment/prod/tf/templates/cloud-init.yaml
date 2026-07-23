@@ -110,7 +110,7 @@ write_files:
       X11Forwarding no
       GatewayPorts no
       PermitTunnel no
-      AllowTcpForwarding no
+      AllowTcpForwarding local
 
   - path: /etc/fail2ban/jail.d/sshd.local
     owner: root:root

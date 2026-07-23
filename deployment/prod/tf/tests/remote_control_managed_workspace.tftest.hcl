@@ -69,6 +69,11 @@ run "remote_control_managed_workspace_plan" {
   }
 
   assert {
+    condition     = length(regexall("(?m)^[[:space:]]+AllowTcpForwarding local$", base64decode(azurerm_linux_virtual_machine.this.custom_data))) == 1 && !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "AllowTcpForwarding no") && !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "AllowTcpForwarding yes") && !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "AllowTcpForwarding all") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "GatewayPorts no") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "PermitTunnel no")
+    error_message = "Cloud-init must permit only client-originated TCP forwarding for VS Code while keeping gateway ports and network-device tunnels disabled."
+  }
+
+  assert {
     condition     = strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "/usr/local/sbin/ensure-codex-remote-control") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "codex-remote-control-bootstrap.service") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "codex-remote-control-health.service") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "codex-remote-control-health.timer") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "After=network-online.target") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "User=azureadmin") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "OnUnitInactiveSec=1min") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "Persistent=true") && length(regexall("(?s)app-server daemon bootstrap --remote-control.*systemctl daemon-reload.*systemctl enable codex-remote-control-bootstrap[.]service codex-remote-control-health[.]timer.*systemctl start codex-remote-control-health[.]timer", base64decode(azurerm_linux_virtual_machine.this.custom_data))) == 1
     error_message = "Cloud-init must install reboot bootstrap and a one-minute managed-daemon health timer without creating another app-server owner."
   }
