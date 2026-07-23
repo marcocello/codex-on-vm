@@ -49,8 +49,8 @@ run "remote_control_managed_workspace_plan" {
   }
 
   assert {
-    condition     = strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "/dev/disk/azure/data/by-lun/0") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "CREATED_PARTITION") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "wipefs --no-act") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "mkfs.ext4") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "UUID=") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "/workspace")
-    error_message = "Cloud-init must prepare the managed LUN as ext4 and persist the /workspace mount by UUID."
+    condition     = output.connection.workspace_mount_path == "/home/azureadmin/projects" && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "/dev/disk/azure/data/by-lun/0") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "CREATED_PARTITION") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "wipefs --no-act") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "mkfs.ext4") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "UUID=") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "/home/azureadmin/projects")
+    error_message = "Cloud-init must prepare the managed LUN as ext4 and persist the /home/azureadmin/projects mount by UUID."
   }
 
   assert {
@@ -64,7 +64,22 @@ run "remote_control_managed_workspace_plan" {
   }
 
   assert {
+    condition     = strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "  - bubblewrap") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "  - apparmor-profiles") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "  - apparmor-utils") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "command -v bwrap") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict") && length(regexall("(?s)install -m 0644 \"[$]BWRAP_PROFILE_SOURCE\" \"[$]BWRAP_PROFILE_TARGET\".*apparmor_parser -r \"[$]BWRAP_PROFILE_TARGET\".*app-server daemon bootstrap --remote-control", base64decode(azurerm_linux_virtual_machine.this.custom_data))) == 1
+    error_message = "Cloud-init must install bubblewrap and load the Ubuntu 24.04 AppArmor profile before starting the Codex daemon."
+  }
+
+  assert {
+    condition     = strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "/usr/local/sbin/ensure-codex-remote-control") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "codex-remote-control-bootstrap.service") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "codex-remote-control-health.service") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "codex-remote-control-health.timer") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "After=network-online.target") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "User=azureadmin") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "OnUnitInactiveSec=1min") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "Persistent=true") && length(regexall("(?s)app-server daemon bootstrap --remote-control.*systemctl daemon-reload.*systemctl enable codex-remote-control-bootstrap[.]service codex-remote-control-health[.]timer.*systemctl start codex-remote-control-health[.]timer", base64decode(azurerm_linux_virtual_machine.this.custom_data))) == 1
+    error_message = "Cloud-init must install reboot bootstrap and a one-minute managed-daemon health timer without creating another app-server owner."
+  }
+
+  assert {
     condition     = !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "azfilesauth") && !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "sec=krb5") && !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "mount.cifs")
     error_message = "The VM workspace must no longer depend on Azure Files or SMB authentication."
+  }
+
+  assert {
+    condition     = output.connection.vm_name == "prod-codex-on-vm-vm"
+    error_message = "The connection output must expose the VM name required by Azure Run Command recovery."
   }
 }

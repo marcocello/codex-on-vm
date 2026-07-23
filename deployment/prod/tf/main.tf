@@ -68,7 +68,7 @@ locals {
     os_disk_size_gb            = 64
     workspace_disk_size_gb     = 256
     workspace_disk_lun         = 0
-    workspace_mount_path       = "/workspace"
+    workspace_mount_path       = "/home/azureadmin/projects"
     local_workspace_mount_path = "~/Volumes/codex-on-vm"
     ssh_host_alias             = "codex-on-vm"
     temporary_ssh_rule_name    = "AllowTemporarySsh"

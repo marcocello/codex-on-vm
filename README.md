@@ -4,13 +4,13 @@
 
 This repository creates an always-available Codex machine in Azure. The VM keeps your repositories and tools online, so your Mac does not need to stay awake.
 
-After setup, connect from another device through Codex Remote Control pairing. SSH is only opened temporarily for setup or maintenance and remains closed during normal use. Repositories live on a separate managed disk at `/workspace`.
+After setup, connect from another device through Codex Remote Control pairing. SSH is only opened temporarily for setup or maintenance and remains closed during normal use. Repositories live on a separate managed disk mounted at `/home/azureadmin/projects`.
 
 ## What Terraform creates
 
 - Ubuntu 24.04 VM with Codex installed for `azureadmin`.
 - No permanent inbound SSH rule.
-- 256 GiB persistent disk mounted at `/workspace`.
+- 256 GiB persistent disk mounted at `/home/azureadmin/projects`.
 - Daily backup with 30-day retention and deletion protection.
 - Local SSH configuration for the `codex-on-vm` alias.
 
@@ -63,7 +63,7 @@ On the VM:
 
 ```bash
 cloud-init status --wait
-findmnt /workspace
+findmnt /home/azureadmin/projects
 test -x ~/.codex/packages/standalone/current/codex
 codex login --device-auth
 codex remote-control start
@@ -79,18 +79,26 @@ scripts/ssh-close.sh
 
 From then on, use the paired device through Remote Control. Reopen SSH only when you need to configure, maintain, or recover the VM, and close it again when finished.
 
-## Repositories
-
-Keep persistent repositories under `/workspace`:
+The VM restarts the managed daemon after reboot and checks it every minute. If Remote Control still disappears, recover it through Azure without opening SSH:
 
 ```bash
-cd /workspace
+scripts/remote-control-recover.sh
+```
+
+Use temporary SSH only if Azure Run Command cannot recover the daemon.
+
+## Repositories
+
+Keep persistent repositories under `/home/azureadmin/projects`:
+
+```bash
+cd /home/azureadmin/projects
 git clone <repository-url>
 ```
 
 The workspace disk survives VM replacement. Files stored elsewhere on the VM might not.
 
-## Mount `/workspace` on the Mac
+## Mount the projects disk on the Mac
 
 Install SSHFS once:
 
@@ -104,6 +112,12 @@ Mount and unmount from the repository root:
 scripts/workspace-open.sh
 # Work in ~/Volumes/codex-on-vm
 scripts/workspace-close.sh
+```
+
+The default remote directory is `/home/azureadmin/projects`. To mount the complete `azureadmin` home directory instead, pass one absolute remote path:
+
+```bash
+scripts/workspace-open.sh /home/azureadmin
 ```
 
 Use SSHFS for occasional local access. Run heavy Git and build operations on the VM, and avoid writing to the same working tree from both machines at once.

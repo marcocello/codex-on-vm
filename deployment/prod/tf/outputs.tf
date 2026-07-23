@@ -8,6 +8,7 @@ output "connection" {
     ssh_fqdn                    = azurerm_public_ip.this.fqdn
     ssh_username                = local.vm.admin_username
     temporary_ssh_rule_name     = local.vm.temporary_ssh_rule_name
+    vm_name                     = azurerm_linux_virtual_machine.this.name
     workspace_disk_name         = azurerm_managed_disk.workspace.name
     workspace_mount_path        = local.vm.workspace_mount_path
     local_mount_path            = pathexpand(local.vm.local_workspace_mount_path)
@@ -26,5 +27,6 @@ output "next_steps" {
     7. Close TCP/22 with: scripts/ssh-close.sh
 
     The base NSG has no inbound SSH allow rule. Repositories persist on the managed disk at ${local.vm.workspace_mount_path}.
+    If Remote Control is unavailable, recover it without SSH from the repository root: scripts/remote-control-recover.sh
   EOT
 }

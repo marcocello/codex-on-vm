@@ -3,7 +3,10 @@ package_update: true
 package_upgrade: true
 
 packages:
+  - apparmor-profiles
+  - apparmor-utils
   - azure-vm-utils
+  - bubblewrap
   - ca-certificates
   - curl
   - e2fsprogs
@@ -25,6 +28,70 @@ write_files:
     permissions: "0755"
     content: |
       ${indent(6, codex_installer_script)}
+
+  - path: /usr/local/sbin/ensure-codex-remote-control
+    owner: root:root
+    permissions: "0755"
+    content: |
+      ${indent(6, codex_recovery_script)}
+
+  - path: /etc/systemd/system/codex-remote-control-bootstrap.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Bootstrap the managed Codex Remote Control daemon after boot
+      Wants=network-online.target
+      After=network-online.target
+      ConditionPathIsExecutable=/home/${admin_username}/.codex/packages/standalone/current/codex
+
+      [Service]
+      Type=oneshot
+      User=${admin_username}
+      Group=${admin_username}
+      Environment=HOME=/home/${admin_username}
+      Environment=CODEX_HOME=/home/${admin_username}/.codex
+      ExecStart=/home/${admin_username}/.codex/packages/standalone/current/codex app-server daemon bootstrap --remote-control
+      TimeoutStartSec=120
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/codex-remote-control-health.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Ensure the managed Codex Remote Control daemon is ready
+      Wants=network-online.target
+      After=network-online.target codex-remote-control-bootstrap.service
+      ConditionPathIsExecutable=/home/${admin_username}/.codex/packages/standalone/current/codex
+
+      [Service]
+      Type=oneshot
+      User=${admin_username}
+      Group=${admin_username}
+      Environment=HOME=/home/${admin_username}
+      Environment=CODEX_HOME=/home/${admin_username}/.codex
+      ExecStart=/usr/local/sbin/ensure-codex-remote-control
+      TimeoutStartSec=240
+
+  - path: /etc/systemd/system/codex-remote-control-health.timer
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Check the managed Codex Remote Control daemon every minute
+
+      [Timer]
+      OnBootSec=2min
+      OnUnitInactiveSec=1min
+      Persistent=true
+      RandomizedDelaySec=10s
+      Unit=codex-remote-control-health.service
+
+      [Install]
+      WantedBy=timers.target
 
   - path: /etc/ssh/sshd_config.d/60-codex-hardening.conf
     owner: root:root
@@ -70,6 +137,14 @@ write_files:
       CODEX_VERSION="${codex_version}"
       CODEX_PACKAGE_URL="${codex_package_url}"
       CODEX_PACKAGE_SHA256="${codex_package_sha256}"
+      BWRAP_PROFILE_SOURCE="/usr/share/apparmor/extra-profiles/bwrap-userns-restrict"
+      BWRAP_PROFILE_TARGET="/etc/apparmor.d/bwrap-userns-restrict"
+
+      command -v bwrap >/dev/null
+      command -v apparmor_parser >/dev/null
+      [[ -f "$BWRAP_PROFILE_SOURCE" ]]
+      install -m 0644 "$BWRAP_PROFILE_SOURCE" "$BWRAP_PROFILE_TARGET"
+      apparmor_parser -r "$BWRAP_PROFILE_TARGET"
 
       ADMIN_HOME="$(getent passwd "$ADMIN_USER" | cut -d: -f6)"
       [[ -d "$ADMIN_HOME" ]]
@@ -147,6 +222,10 @@ write_files:
           CODEX_HOME="$ADMIN_CODEX_HOME" \
           "$MANAGED_CODEX" app-server daemon bootstrap
       fi
+
+      systemctl daemon-reload
+      systemctl enable codex-remote-control-bootstrap.service codex-remote-control-health.timer
+      systemctl start codex-remote-control-health.timer
 
       install -d -m 0755 /var/lib/codex-on-vm
       touch /var/lib/codex-on-vm/bootstrap-ready

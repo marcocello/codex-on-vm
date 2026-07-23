@@ -29,13 +29,20 @@ cleanup_on_exit() {
 trap cleanup_on_exit EXIT
 trap 'exit 130' INT TERM
 
+[[ "$#" -le 1 ]] || fail "expected zero or one remote path argument"
+REMOTE_PATH_OVERRIDE="${1:-}"
+if [[ -n "$REMOTE_PATH_OVERRIDE" ]]; then
+  [[ "$REMOTE_PATH_OVERRIDE" == /* ]] || fail "remote path must be absolute"
+  [[ "$REMOTE_PATH_OVERRIDE" != *$'\n'* && "$REMOTE_PATH_OVERRIDE" != *$'\r'* && "$REMOTE_PATH_OVERRIDE" != *$'\t'* ]] || fail "remote path must not contain control characters"
+fi
+
 [[ "$(uname -s)" == "Darwin" ]] || fail "this helper is for macOS"
 for command in diskutil find mount python3 sshfs terraform; do
   command -v "$command" >/dev/null || fail "missing required command: $command"
 done
 
 CONNECTION="$(terraform -chdir="$TF_DIR" output -json connection)"
-IFS=$'\t' read -r SSH_ALIAS REMOTE_PATH DEFAULT_MOUNT <<<"$(CONNECTION="$CONNECTION" python3 - <<'PY'
+IFS=$'\t' read -r SSH_ALIAS DEFAULT_REMOTE_PATH DEFAULT_MOUNT <<<"$(CONNECTION="$CONNECTION" python3 - <<'PY'
 import json
 import os
 
@@ -43,6 +50,7 @@ value = json.loads(os.environ["CONNECTION"])
 print("\t".join(value[key] for key in ("ssh_alias", "workspace_mount_path", "local_mount_path")))
 PY
 )"
+REMOTE_PATH="${REMOTE_PATH_OVERRIDE:-$DEFAULT_REMOTE_PATH}"
 MOUNT_PATH="${CODEX_WORKSPACE_LOCAL_MOUNT_PATH:-$DEFAULT_MOUNT}"
 mkdir -p "$MOUNT_PATH"
 if mount | grep -F " on $MOUNT_PATH " >/dev/null 2>&1; then

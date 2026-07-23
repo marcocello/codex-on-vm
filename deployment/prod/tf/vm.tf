@@ -15,6 +15,7 @@ resource "azurerm_linux_virtual_machine" "this" {
     codex_package_sha256   = local.provisioning.codex_package_sha256
     verified_fetch_script  = file("${path.module}/scripts/fetch-verified-artifact.sh")
     codex_installer_script = file("${path.module}/scripts/install-verified-codex.sh")
+    codex_recovery_script  = file("${path.module}/scripts/ensure-codex-remote-control.sh")
   }))
   tags = local.custom_tags
 
