@@ -2,13 +2,13 @@
 
 ## Done
 
-- The production Mac helper creates and updates a real Git clone in a remote-home fixture.
+- The production Mac helper creates and updates a real Git clone under the remote fixture's persistent `projects` directory when no override is supplied.
 - A clean branch at its former tracked upstream tip follows a force-updated origin without replaying obsolete upstream commits; a later genuine local commit is the only commit replayed across another force-update.
 - A conflicting default rebase aborts, restores the exact original branch commit and clean worktree, and fails before daemon or Codex-home mutation.
 - A real Codex directory becomes a timestamped backup, its ignored runtime state survives in the clone, tracked repository files win, and `.codex` resolves to `dot-codex`.
 - A second run updates the clone without creating another backup or repeating the daemon migration.
 - An existing clone with tracked local edits is rejected before the daemon or `.codex` changes.
-- A managed but unauthenticated Codex home is rejected before the daemon or `.codex` changes and reports the required login action.
+- A managed but unauthenticated Codex home is rejected before the daemon or `.codex` changes and directs the operator to the Mac-owned `scripts/codex-vm.sh pair` workflow rather than VM-side authentication.
 - A stale prior SSH state is normalized before opening, every phase is printed in order, and Azure recovery runs before migration and after SSH closure.
 - Remote Control progresses through `connecting` with otherwise valid fields, failed starts, the VM recovery helper, `connected` with a timeout, `connected` with an empty environment ID, and finally verified `connected` state; daemon-only health and every independently invalid status, timeout, or environment response are insufficient.
 - Remote failure closes temporary SSH, and a post-move recovery failure restores the original Codex directory.
@@ -21,11 +21,11 @@
 
 ## Scenario: Fresh migration and idempotent update
 
-- Producer/activation: the proof invokes an exact copy of `scripts/dot-codex-bootstrap.sh` with the default empty remote-path override, then repeats the workflow after the origin advances.
+- Producer/activation: the proof extracts the production bundle from `scripts/codex-vm.sh`, invokes an exact copy of its dot-codex helper with the default empty remote-path override, then repeats the workflow after the origin advances.
 - Consumer: the production entrypoint normalizes stale SSH state, opens temporary SSH, reconciles Azure recovery, transmits its real remote program through an `ssh` subprocess, closes SSH, and performs final Azure recovery.
-- Read-back: the proof uses real Git and filesystem tools to inspect the remote clone origin and revision, tracked content, migrated ignored files, backup count, exact symlink, daemon/recovery command logs, lifecycle ordering, and numbered operator output after the first and second runs.
+- Read-back: the proof uses real Git and filesystem tools to inspect the default `~/projects/dot-codex` clone path, origin and revision, tracked content, migrated ignored files, backup count, exact `~/.codex` symlink into `projects`, daemon/recovery command logs, lifecycle ordering, and numbered operator output after the first and second runs.
 - Fake: only Azure-backed SSH open/close, Azure recovery transport, the network SSH transport, and the managed Codex/recovery executables are replaced. The fake SSH executable reparses the remote command with an OpenSSH-equivalent shell boundary; Git clone, fetch, merge, backup, migration, rollback, and symlink behavior remain real.
-- Catches: a helper that merely prints commands, hides phase progress, replaces the wrong host path, loses runtime state, overwrites tracked clone content, recreates backups on rerun, skips updates, restarts unnecessarily, leaves SSH open, or requires multiple operator commands.
+- Catches: a helper that merely prints commands, hides phase progress, defaults back to VM-local `~/dot-codex`, replaces the wrong host path, loses runtime state, overwrites tracked clone content, recreates backups on rerun, skips updates, restarts unnecessarily, leaves SSH open, or requires multiple operator commands.
 
 ## Scenario: Remote Control needs real repair and connection read-back
 
@@ -63,7 +63,7 @@
 
 - Producer/activation: the fixture provides a managed Codex executable whose real `login status` subprocess boundary reports no login, then invokes the production helper.
 - Consumer: the production helper reaches the same managed executable it would stop and migrate.
-- Read-back: the command must fail with the login instruction, temporary SSH must close, `.codex` must remain the original directory, no backup may exist, and neither Azure recovery, daemon stop, nor Remote Control start may run.
+- Read-back: the command must fail with the local `scripts/codex-vm.sh pair` instruction and no “on the VM” direction, temporary SSH must close, `.codex` must remain the original directory, no backup may exist, and neither Azure recovery, daemon stop, nor Remote Control start may run.
 - Fake: the unsafe SSH lifecycle and transport plus the managed Codex executable are deterministic subprocess fakes.
 - Catches: discovering missing credentials only after moving the Codex home or disrupting the daemon.
 
@@ -79,7 +79,14 @@
 
 Proves:
 
-- Single-entrypoint Mac orchestration, numbered progress output, stale SSH normalization, Azure recovery ordering, remote Git convergence through default rebase, rebase-conflict restoration, tracked-work and missing-login refusal, state-preserving symlink migration, actual Remote Control connection read-back, repeat-run behavior, cleanup, and rollback across production subprocess boundaries.
+- Single-entrypoint Mac orchestration, persistent default clone placement, numbered progress output, stale SSH normalization, Azure recovery ordering, remote Git convergence through default rebase, rebase-conflict restoration, tracked-work and missing-login refusal, state-preserving symlink migration, actual Remote Control connection read-back, repeat-run behavior, cleanup, and rollback across production subprocess boundaries.
+
+## Repair History
+
+- 2026-07-24 evaluator correction: missing-login failures still printed a direct `codex login --device-auth` or “authenticate on the VM” instruction after deployment ownership moved to Mac-launched entrypoints. The proof now requires `scripts/codex-vm.sh pair` guidance and rejects VM-side authentication instructions.
+- 2026-07-23 persistence correction: the default clone must live at `~/projects/dot-codex` so the operator bootstrap cannot redirect the active `~/.codex` back to the VM OS disk after the local preparation entrypoint established a persistent home.
+- Strengthened proof decision: drive the production helper with an empty `DOT_CODEX_REMOTE_DIR`, precreate the remote `projects` mount fixture, and require both the real clone and `~/.codex` read-back to resolve under that persistent directory. Explicit override scenarios remain unchanged.
+- Red evidence: captured attempt `proof/runs/20260723T220030820730Z` runs the pre-change default, logs `Remote clone: $HOME/dot-codex`, creates the real clone in the VM-local home, and fails because the expected persistent clone was not created.
 
 Does not prove:
 

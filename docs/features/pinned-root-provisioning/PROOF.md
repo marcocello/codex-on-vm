@@ -1,75 +1,63 @@
 # Proof Plan
 
 ## Definition Of Done
-- A mocked root Terraform plan renders the exact pinned image and Codex release.
-- The rendered cloud-init contains repository-owned verified-download/install scripts and contains no mutable Codex install-script execution.
+- A mocked Terraform plan exposes the exact pinned Ubuntu image and Codex release URL, version, and SHA-256 digest without launching guest preparation.
+- The checked-in local preparation and VM provisioner paths use the repository-owned verified fetch/install scripts and contain no mutable Codex install-script execution.
 - The production Codex installer publishes a valid package only after matching its expected digest and version.
 - A tampered archive is rejected and leaves no published executable or release directory.
 
 ## Primary Proof
-Type: cli-subprocess
+Type: CLI subprocess
 
 Boundary:
-- Producer: Terraform renders VM cloud-init and cloud-init invokes repository-owned provisioning commands as root.
-- Activation path: `terraform test` plans the real root module, and the proof invokes the exact production artifact installer as a subprocess.
-- Consumer: Terraform image/custom-data configuration plus the verified fetch and Codex package installer scripts.
+- Producer: Terraform outputs the reviewed pins and the local preparation entrypoint transmits the provisioner/installers extracted from `scripts/codex-vm.sh`.
+- Activation: `terraform test` plans the production root, and the proof invokes the exact production artifact installer as a subprocess.
+- Consumer: Terraform image/output configuration plus the verified fetch and Codex package installer scripts consumed by local VM preparation.
 - Durable state: Mocked VM plan and temporary standalone release/bin directories.
-- Read-back: Terraform assertions, installed command version, symlink target, release layout, and absence of files after an injected digest mismatch.
+- Read-back: Terraform assertions, source ownership guards, installed command version, symlink target, release layout, and absence of files after an injected digest mismatch.
 - Unsafe edge: Azure provider calls and remote downloads are replaced by Terraform mocks and a fake `curl` executable serving local fixtures.
 
 Command:
 ```bash
-scripts/proof_run_capture --serious --feature-dir docs/features/pinned-root-provisioning --source-path deployment/prod/tf/main.tf --source-path deployment/prod/tf/vm.tf --source-path deployment/prod/tf/templates/cloud-init.yaml --source-path deployment/prod/tf/scripts/fetch-verified-artifact.sh --source-path deployment/prod/tf/scripts/install-verified-codex.sh --source-path deployment/prod/tf/tests/pinned_root_provisioning.tftest.hcl --source-path docs/features/pinned-root-provisioning/proof/run.sh --behavior-boundary "Terraform root plan and cloud-init -> repository-owned verified installers -> planned pins and installed-or-rejected artifact read-back" --oracle-scope "$(cat docs/features/pinned-root-provisioning/PROOF.md)" --notes "Provisioning pins root-installed artifacts and rejects tampered Codex packages before publication" -- docs/features/pinned-root-provisioning/proof/run.sh
+"${CODEX_HOME:-$HOME/.codex}/scripts/proof_run_capture" --feature-dir docs/features/pinned-root-provisioning --timeout-seconds 30 --note "Verify locally launched VM preparation retains pinned root artifact installation"
 ```
 
 Expected evidence:
-- Terraform test reports the pinned root-provisioning plan passed.
+- Terraform test reports the pinned root-provisioning plan passed with an explicit image and non-sensitive Codex output pins.
+- Terraform has no custom-data bootstrap, while the local and VM preparation scripts reference the checked-in verified installer boundary.
 - The valid fixture installs as version `0.144.3` in the standalone layout.
-- The package is executable from the daemon-required `packages/standalone/current/codex` path.
+- The package is executable from `packages/standalone/current/codex`.
 - The modified fixture fails SHA-256 validation and creates no visible command.
 
-## Claimed Behavior Coverage
-| FEATURE claim | Real production entrypoint proof drives | Fake boundary used | Read-back |
-| --- | --- | --- | --- |
-| Root Terraform plan uses explicit image and artifact pins | Root `terraform test` plan | Provider operations | Planned image version and rendered cloud-init text |
-| Verified Codex package installs atomically | Production installer subprocess | Remote bytes served by fake `curl` | Release layout, symlink, and `codex --version` |
-| Tampered Codex package fails closed | Same production installer with changed bytes | Remote bytes served by fake `curl` | Nonzero result and absence of release/bin paths |
-
-## Fake Boundary Ledger
-- Fake: AzureRM, External, and Local provider calls plus remote HTTP transport.
-- Allowed because: The proof must not replace a paid VM or install packages on a live root filesystem.
-- Not faked: Terraform parsing/planning, cloud-init rendering, production verified-download and installer scripts, SHA-256 calculation, archive extraction, version check, atomic publication, and filesystem read-back.
-
-## Proof Scope
+## Scope
 Proves:
-- The local Terraform and provisioning implementation declares fixed inputs and fails closed for a tampered Codex archive at the real installer boundary.
+- The repository declares fixed VM/package inputs and fails closed for a tampered Codex archive at the real installer boundary after deployment ownership moves to the local entrypoint.
 
 Does not prove:
-- Azure marketplace image availability at apply time, live cloud-init completion, future release availability, or runtime compatibility of the real binary on the deployed VM.
+- Azure marketplace image availability, live Run Command transport, future release availability, or runtime compatibility of the real binary on the deployed VM.
 
 False-green risks:
-- A legitimate upstream artifact could later disappear despite remaining cryptographically pinned.
-- A compromised repository commit could maliciously update both URL and digest; code review and repository controls remain required.
+- A legitimate upstream artifact can disappear while remaining cryptographically pinned.
+- A compromised repository commit could maliciously update both URL and digest.
 
-Evidence strength:
-- deterministic configuration and installer proof with live-VM gap
+Evidence method:
+- Deterministic Terraform and real installer subprocess proof.
+
+Known gaps:
+- Live Azure and upstream artifact availability.
 
 ## Secondary Guards
 - `terraform fmt -check -recursive`
 - `terraform validate`
-- `bash -n deployment/prod/tf/scripts/fetch-verified-artifact.sh deployment/prod/tf/scripts/install-verified-codex.sh`
+- `bash -n` for fetch, installer, local preparation, and VM provisioner scripts
 - `git diff --check`
 
-## Environment And Data
-- Terraform 1.14+, initialized providers, Bash, tar, Python 3, and SHA-256 tooling.
-- Generated local archives and fake HTTP transport only; no Azure credentials or root writes.
+## Environment
+- Terraform 1.14+, Bash, tar, Python 3, and SHA-256 tooling.
+- Generated archives and fake HTTPS transport only; no Azure credentials or root writes.
 
-## Anti-Gaming Review
-- Fake pass risk: declare a version but still download `latest`. Proof catch: Terraform assertions require the exact versioned release URL and reject the mutable installer URL.
-- Fake pass risk: calculate a digest after download without comparing to a repository pin. Proof catch: a tampered fixture must fail and leave no visible command.
-- Fake pass risk: verify bytes but publish before checking package version. Proof catch: the installed command must report the declared version before atomic publication succeeds.
-- Fake pass risk: pin Codex while leaving the base image mutable. Proof catch: the rendered plan asserts the exact image version.
-- Broken implementation that would still pass: a malicious reviewed commit could change both bytes and expected digest; repository review/signing is outside the VM provisioning boundary.
+## Proof Repair History
+- 2026-07-24 deployment-ownership correction: the verified installer is no longer activated by cloud-init. Terraform exposes the reviewed pins, the machine-preparation helper embedded in `scripts/codex-vm.sh` transmits checksummed checked-in code, and the VM provisioner invokes the same installer from Azure Run Command's root context. The archive-integrity and atomic-publication proof remains unchanged.
 
 ## Manual Gaps
-- A reviewed live plan/apply and cloud-init status/log read-back remain required before the deployed VM can be claimed to use these pins.
+- A reviewed live plan, local preparation run, and installed-version read-back are required before claiming the deployed VM uses the pin.

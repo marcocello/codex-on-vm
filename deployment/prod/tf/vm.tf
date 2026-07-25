@@ -6,18 +6,7 @@ resource "azurerm_linux_virtual_machine" "this" {
   admin_username                  = local.vm.admin_username
   disable_password_authentication = true
   network_interface_ids           = [azurerm_network_interface.this.id]
-  custom_data = base64encode(templatefile("${path.module}/templates/cloud-init.yaml", {
-    admin_username         = local.vm.admin_username
-    workspace_mount_path   = local.vm.workspace_mount_path
-    workspace_disk_lun     = local.vm.workspace_disk_lun
-    codex_version          = local.provisioning.codex_version
-    codex_package_url      = local.provisioning.codex_package_url
-    codex_package_sha256   = local.provisioning.codex_package_sha256
-    verified_fetch_script  = file("${path.module}/scripts/fetch-verified-artifact.sh")
-    codex_installer_script = file("${path.module}/scripts/install-verified-codex.sh")
-    codex_recovery_script  = file("${path.module}/scripts/ensure-codex-remote-control.sh")
-  }))
-  tags = local.custom_tags
+  tags                            = local.custom_tags
 
   dynamic "admin_ssh_key" {
     for_each = local.vm.admin_ssh_public_keys

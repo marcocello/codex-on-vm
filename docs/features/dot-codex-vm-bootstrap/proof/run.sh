@@ -2,8 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-SCRIPT="$ROOT/scripts/dot-codex-bootstrap.sh"
 PROOF_TMP="$(mktemp -d)"
+OPERATOR_ROOT="$PROOF_TMP/operator-root"
+CODEX_VM_TEST_MODE=1 "$ROOT/scripts/codex-vm.sh" __extract-helpers "$OPERATOR_ROOT"
+SCRIPT="$OPERATOR_ROOT/scripts/dot-codex-bootstrap.sh"
 
 cleanup() {
   rm -rf "$PROOF_TMP"
@@ -109,7 +111,7 @@ make_remote_codex_home() {
   local fixture="$1"
   local remote_home="$fixture/remote-home"
   local codex_home="$remote_home/.codex"
-  mkdir -p "$codex_home/packages/standalone/current"
+  mkdir -p "$remote_home/projects" "$codex_home/packages/standalone/current"
   printf 'stale tracked config\n' >"$codex_home/AGENTS.md"
   printf 'preserved auth\n' >"$codex_home/auth.json"
   printf 'preserved runtime\n' >"$codex_home/runtime-state.bin"
@@ -195,7 +197,7 @@ MAIN_ORIGIN="$(make_origin "$MAIN_FIXTURE")"
 MAIN_BASE_REVISION="$(git -C "$MAIN_FIXTURE/seed" rev-parse HEAD)"
 make_harness "$MAIN_FIXTURE"
 make_remote_codex_home "$MAIN_FIXTURE"
-MAIN_REMOTE_DIR="$MAIN_FIXTURE/remote-home/dot-codex"
+MAIN_REMOTE_DIR="$MAIN_FIXTURE/remote-home/projects/dot-codex"
 printf 'Remote fixture ready: %s\n' "$MAIN_FIXTURE/remote-home"
 
 if ! FAKE_REQUIRE_REMOTE_HELPER=1 FAKE_CONNECTING_ONCE=1 FAKE_INVALID_CONNECTED_SEQUENCE=1 \
@@ -226,6 +228,7 @@ assert_patterns_in_order \
 assert_patterns_in_order \
   "$MAIN_FIXTURE/first-output.log" \
   "[1/8] Validate local inputs and helper availability" \
+  'Remote clone: $HOME/projects/dot-codex' \
   "[2/8] Normalize temporary SSH state" \
   "[3/8] Open restricted temporary SSH" \
   "[4/8] Reconcile and repair current Remote Control" \
@@ -426,8 +429,11 @@ if FAKE_CODEX_NOT_LOGGED_IN=1 run_helper \
   "$AUTH_REMOTE_DIR" >"$AUTH_FIXTURE/output.log" 2>&1; then
   fail "managed Codex home without credentials unexpectedly succeeded"
 fi
-grep -F 'codex login --device-auth' "$AUTH_FIXTURE/output.log" >/dev/null ||
-  fail "missing-auth refusal did not report the login instruction"
+grep -F 'scripts/codex-vm.sh pair' "$AUTH_FIXTURE/output.log" >/dev/null ||
+  fail "missing-auth refusal did not direct authentication to the local pairing entrypoint"
+if grep -Fi 'on the VM' "$AUTH_FIXTURE/output.log" >/dev/null; then
+  fail "missing-auth refusal still directs authentication from inside the VM"
+fi
 [[ -d "$AUTH_FIXTURE/remote-home/.codex" && ! -L "$AUTH_FIXTURE/remote-home/.codex" ]] || fail "missing-auth refusal changed .codex"
 assert_backup_count "$AUTH_FIXTURE/remote-home" 0
 [[ "$(tail -n 1 "$AUTH_FIXTURE/lifecycle.log")" == "close" ]] || fail "SSH was not closed after missing-auth refusal"

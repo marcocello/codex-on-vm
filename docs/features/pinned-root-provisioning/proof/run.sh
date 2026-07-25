@@ -3,15 +3,31 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 TF_DIR="$ROOT/deployment/prod/tf"
-INSTALLER="$TF_DIR/scripts/install-verified-codex.sh"
-FETCHER="$TF_DIR/scripts/fetch-verified-artifact.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+OPERATOR_ROOT="$TMP/operator-root"
+CODEX_VM_TEST_MODE=1 "$ROOT/scripts/codex-vm.sh" __extract-helpers "$OPERATOR_ROOT"
+LOCAL_PREPARER="$OPERATOR_ROOT/scripts/prepare-machine.sh"
+INSTALLER="$OPERATOR_ROOT/vm-scripts/install-verified-codex.sh"
+FETCHER="$OPERATOR_ROOT/vm-scripts/fetch-verified-artifact.sh"
+VM_PREPARER="$OPERATOR_ROOT/vm-scripts/prepare-codex-vm.sh"
 
 terraform -chdir="$TF_DIR" test -filter=tests/pinned_root_provisioning.tftest.hcl
 
 [[ -x "$INSTALLER" ]]
 [[ -x "$FETCHER" ]]
+[[ -x "$LOCAL_PREPARER" ]]
+[[ -x "$VM_PREPARER" ]]
+if rg -n '^[[:space:]]*custom_data[[:space:]]*=' "$TF_DIR" --glob '*.tf' >/dev/null; then
+  printf 'Terraform must not activate the root installer through custom data\n' >&2
+  exit 1
+fi
+rg -F '/usr/local/sbin/install-verified-codex' "$VM_PREPARER" >/dev/null
+rg -F 'install_checked' "$LOCAL_PREPARER" >/dev/null
+if rg -F 'https://chatgpt.com/codex/install.sh' "$LOCAL_PREPARER" "$VM_PREPARER" >/dev/null; then
+  printf 'local preparation must not use the mutable Codex installer\n' >&2
+  exit 1
+fi
 
 PACKAGE="$TMP/package"
 mkdir -p "$PACKAGE/bin" "$PACKAGE/codex-path" "$PACKAGE/codex-resources"
@@ -88,7 +104,7 @@ fi
 [[ ! -e "$TMP/bad-bin/codex" ]]
 [[ ! -e "$TMP/bad-home/packages/standalone/releases/0.144.3-x86_64-unknown-linux-musl" ]]
 
-bash -n "$FETCHER" "$INSTALLER"
+bash -n "$FETCHER" "$INSTALLER" "$LOCAL_PREPARER" "$VM_PREPARER"
 terraform -chdir="$TF_DIR" fmt -check -recursive
 terraform -chdir="$TF_DIR" validate
 printf 'Pinned root provisioning proof passed.\n'

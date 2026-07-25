@@ -1,155 +1,106 @@
 # Proof Plan
 
 ## Definition Of Done
-- The mocked Terraform plan has no permanent inbound SSH rule and creates a private-access-only managed disk attached at LUN 0.
-- Rendered cloud-init publishes the verified Codex package at `azureadmin`'s daemon-required managed standalone path, installs the Linux sandbox prerequisites, loads the Ubuntu 24.04 `bwrap` AppArmor profile, safely prepares the data disk, mounts `/home/azureadmin/projects` by filesystem UUID, and bootstraps the daemon as that user.
-- Rendered cloud-init installs a boot-time managed-daemon bootstrap service and a one-minute health timer. The production health script handles healthy, stopped, and precisely verified stale-updater/defunct-child states while refusing to signal mismatched processes.
-- The backup plan includes the VM data disk, and the managed disk has a delete lock.
-- The real temporary-access scripts create only an IPv4 `/32` TCP/22 rule, verify its exact identity and access values, and remove that same rule on close.
-- Rendered cloud-init configures OpenSSH with local-only TCP forwarding for VS Code Remote-SSH while keeping gateway ports and network-device tunnels disabled.
-- The real macOS workspace scripts cross the SSHFS subprocess boundary, use the Terraform projects path by default, accept one absolute remote-path override, reject invalid input before opening SSH, read back the mounted state, and remove both the mount and temporary NSG rule on close or failed open.
-- The real macOS recovery helper invokes Run Command for the intended VM, verifies and reconciles the exact checked-in VM helper only when its bytes differ, and invokes the reconciled target as the admin user without creating an NSG rule or opening SSH.
-- README and architecture documentation describe the no-public-SSH default, first pairing workflow, managed-disk rationale, migration warning, recovery path, and optional paid JIT upgrade.
+- The mocked Terraform plan creates the VM, protected managed disk, backup, and private-by-default network without `custom_data`, a Terraform-managed VM Run Command, a remote-exec provisioner, or a permanent inbound SSH rule.
+- Terraform exposes the non-secret VM, disk, Codex package, and local SSH-path values required by repository-owned local entrypoints.
+- The real machine-preparation implementation and VM payload bundle extracted from `scripts/codex-vm.sh` read Terraform output, verify the active subscription, wait for the intended VM agent, and send the exact provisioner and supporting helpers through Azure Run Command without opening SSH.
+- The Azure boundary executes that transmitted payload in an isolated VM fixture. Read-back proves checksummed helper reconciliation, package installation, ext4 UUID persistence, the selected persistent Codex home, CLI publication, SSH hardening, systemd mount dependencies, readiness marking, and SSH host-key return.
+- Fresh-host SSH validation requires the provisioner to create `/run/sshd` before `sshd -t`, then reload an active `ssh.service`, preserve an active `ssh.socket`, or enable/start SSH when neither is active; a missing readiness marker must surface the bounded Azure Run Command diagnostic instead of hiding the guest failure.
+- Local SSH known-hosts and host configuration files are written only after the remote readiness marker and host key are returned. A second preparation run preserves persistent authentication state and converges without a second disk format.
+- The real local pairing entrypoint owns temporary SSH cleanup and launches login, Remote Control start, and pairing as the VM admin user; no documented workflow asks the operator to enter the VM and launch setup commands.
+- Existing daemon recovery, temporary access, and SSHFS workspace lifecycles retain their exact safety behavior.
 
 ## Primary Proof
-Type: cli-subprocess
+Type: CLI subprocess and provider boundary
 
 Boundary:
-- Producer: Terraform configuration, systemd timer activation, and operator invocation of repository recovery, access, and workspace helpers.
-- Activation path: the verified-installer proof executes the packaged `current/codex`, `terraform test` plans the production root, then the proof invokes the production daemon-health, Azure recovery, temporary-access, and workspace scripts as subprocesses.
-- Consumer: AzureRM configuration, rendered cloud-init/systemd units, managed Codex lifecycle commands, process-record validation, Azure Run Command, temporary SSH lifecycle, and SSHFS workspace lifecycle.
-- Durable state: Mocked Terraform plan, daemon-format PID records, process/signal call log, temporary access JSON, fake NSG rule state, and fake mount state.
-- Read-back: Terraform assertions, rendered cloud-init assertions, managed-daemon JSON status, exact process/signal calls, fake Azure Run Command/NSG queries, JSON state inspection, mount-state queries, and call-log ordering.
-- Unsafe edge: Azure control-plane calls, Codex daemon processes, process signals, public-IP discovery, SSHFS/FUSE, Remote Control enrollment, and live backup are replaced only at their outer command/provider boundaries.
+- Producer: Terraform output plus operator invocation of repository-local preparation, pairing, recovery, access, and workspace entrypoints.
+- Activation: the proof invokes the production local scripts. A fake Azure CLI replaces only the live Azure edge and executes the actual transmitted preparation payload in an isolated VM filesystem.
+- Consumer: the production VM provisioner, verified installer, persistent-home selector, systemd/SSH configuration writer, local SSH configuration writer, daemon recovery helper, and access/workspace scripts.
+- Durable state: Terraform plan, isolated VM filesystem, ext4/fstab model, persistent Codex home, installed package layout, systemd and SSH files, preparation marker, local SSH files, process records, temporary NSG rule state, and mount state.
+- Read-back: Terraform assertions, exact Azure CLI calls, payload execution, checksummed installed bytes, filesystem contents and symlinks, preserved authentication sentinel, command ordering, local SSH file contents, daemon JSON status, provider rule queries, and mount queries.
+- Unsafe edge: live Azure resources, VM agent, block-device formatting, package network access, real systemd/AppArmor/SSH, process signals, public-IP discovery, Remote Control enrollment, and SSHFS/FUSE are replaced at their outer command/provider boundaries.
 
 Command:
 ```bash
-scripts/proof_run_capture --feature-dir docs/features/remote-control-managed-workspace --timeout-seconds 45 --note "Verify managed daemon boot recovery, safe stale-process repair, Azure Run Command, managed disk, and temporary access"
+"${CODEX_HOME:-$HOME/.codex}/scripts/proof_run_capture" --feature-dir docs/features/remote-control-managed-workspace --timeout-seconds 75 --note "Verify Terraform-only infrastructure followed by locally launched VM preparation, pairing, recovery, and access"
 ```
 
 Expected evidence:
-- Terraform test reports the managed-workspace plan passed, and a source guard confirms the production root declares no inline or standalone NSG rule.
-- A source guard confirms the workspace managed disk enables Terraform `prevent_destroy` in addition to its Azure delete lock.
-- Cloud-init includes safe empty-disk detection, UUID fstab mounting, and a user-owned daemon bootstrap.
-- Cloud-init installs and verifies `~/.codex/packages/standalone/current/codex` as `azureadmin` and uses that exact executable for daemon bootstrap.
-- Cloud-init installs `bubblewrap`, `apparmor-profiles`, and `apparmor-utils`, verifies `bwrap` on `PATH`, and loads `bwrap-userns-restrict` before daemon bootstrap.
-- Cloud-init installs and enables the boot bootstrap service and health timer after the initial managed daemon bootstrap.
-- A healthy-daemon scenario invokes the idempotent start path and never restarts or signals a process.
-- A stopped-daemon scenario starts the managed daemon and verifies the daemon's JSON status and managed executable path.
-- A stale-process scenario proves the order `start -> restart -> TERM -> start -> JSON readiness`. It uses the live standalone layout where `current/codex` resolves to a versioned release and `/proc/<updater>/exe` is a byte-identical backup copy, then signals only when PID records, user, start time, executable content, exact command role, defunct child, and parent relationship all match.
-- Eight independent mismatch scenarios falsify updater user, updater start time, updater command, updater executable content, app-server user, app-server start time, zombie state, and parent relationship; every scenario exits non-zero without sending a signal.
-- Managed-daemon readiness accepts a canonical versioned release path only when it resolves to the same executable file as `current/codex`.
-- Authentication, pairing, and daemon settings sentinels remain unchanged across every recovery scenario.
-- Azure recovery crosses the production Mac helper boundary and executes its Run Command payload. A corrupted decoded payload fails after remote checksum calculation but before install or invocation, leaving the outdated target unchanged. With valid content, the first invocation installs bytes identical to the checked-in helper and runs recovery as `azureadmin`; the second invocation runs recovery again without another install. Neither invocation creates an SSH rule.
-- Temporary access passes an exact inbound `8.8.8.8/32` TCP/22 create request to the fake Azure boundary, whose persisted request drives identity-aware production read-back and deletion; wrong-target show/delete requests fail without removing the rule.
-- Rendered OpenSSH configuration contains exactly `AllowTcpForwarding local`, `GatewayPorts no`, and `PermitTunnel no`, and contains neither `AllowTcpForwarding no` nor unrestricted `yes`/`all`.
-- Workspace open refuses to take over or close a separately opened temporary SSH session.
-- Workspace open without an argument calls SSHFS for `codex-on-vm:/home/azureadmin/projects`; an explicit `/home/azureadmin` argument reaches SSHFS unchanged.
-- Relative paths and extra positional arguments fail before an NSG create call, mount state, or access state exists.
-- Workspace close unmounts before deleting the NSG rule.
-- Injected SSHFS failure leaves neither a fake mount nor a temporary NSG rule.
+- Terraform tests pass while `azurerm_linux_virtual_machine.this.custom_data` is absent and no `azurerm_virtual_machine_run_command`, `remote-exec`, or Terraform local SSH-file resource exists.
+- Source guards retain no permanent NSG rule and require the managed-disk destruction guard.
+- The production local preparation script invokes Azure Run Command for the exact subscription, resource group, and VM after VM-agent readiness; it never creates an NSG rule or calls SSH.
+- The transmitted payload installs byte-identical helpers from the inline bundle before invoking the VM provisioner.
+- The production VM provisioner runs the verified installer, preserves existing persistent authentication, mounts before selecting/installing Codex, writes only the expected fstab entry, creates `~/.codex` to the selected projects-disk home, and publishes the CLI from the projects disk.
+- SSH hardening permits only local TCP forwarding, and both Remote Control services require `/home/azureadmin/projects`.
+- Readiness output contains the exact prepared marker and Ed25519 host key; the Mac files contain the Terraform FQDN, user, identity path, strict host checking, and dedicated known-hosts path.
+- The isolated fresh-VM boundary rejects `sshd -t` until `/run/sshd` exists, rejects reloading an inactive SSH service while `ssh.socket` owns activation, and separately requires SSH startup when neither unit is active. The missing-marker scenario requires the remote diagnostic in local failure output.
+- A repeated preparation run does not format the disk again or alter persistent authentication state.
+- The pairing helper opens and closes restricted SSH around admin-user login/start/pair commands and closes access after an injected failure.
+- Persistent-home fixtures cover fresh, existing `.codex`, existing `dot-codex`, unexpected real-home refusal, and mismatched-link refusal.
+- Daemon recovery covers healthy, stopped, verified stale-updater, and eight mismatch scenarios without changing authentication, pairing, or settings.
+- Azure recovery reconciles the checked-in helper by checksum and invokes it without opening SSH.
+- Temporary SSH and SSHFS scenarios retain identity-aware cleanup, input rejection, exact path selection, and failure cleanup.
 
 ## Claimed Behavior Coverage
-| FEATURE claim | Real production entrypoint proof drives | Fake boundary used | Read-back |
+| FEATURE claim | Production activation | Fake boundary | Read-back |
 | --- | --- | --- | --- |
-| No permanent SSH ingress | Production Terraform root plus source guard | Azure providers | No inline or standalone NSG rule declaration |
-| Persistent Git workspace uses managed disk | Production Terraform root and rendered cloud-init | Azure providers | Disk SKU/access, LUN attachment, ext4/UUID mount commands |
-| Daemon belongs to `azureadmin` | Rendered production cloud-init | Azure provider | `runuser`/HOME ownership and exact bootstrap command |
-| Daemon uses its managed standalone package | Rendered production cloud-init plus production verified installer subprocess | Azure provider and remote bytes | Per-user `current/codex` path, version execution, and absence of `/opt/codex` |
-| Daemon has the Linux sandbox prerequisites | Production Terraform root and rendered cloud-init | Azure provider | Distribution `bubblewrap` packages, `bwrap` readiness check, and Ubuntu AppArmor profile load |
-| Daemon returns after reboot or ordinary exit | Rendered production systemd units and production health script subprocess | Azure provider, Codex CLI, process table | Enabled boot/timer configuration plus managed-daemon JSON readiness |
-| Stale daemon recovery signals only the recorded owner | Production health script subprocess with daemon-format PID records, versioned argv, and a simulated `/proc/<pid>/exe` | Codex CLI, process table, process executable, signal | Supported lifecycle attempts precede one verified parent signal; mismatched records or executable bytes produce no signal |
-| Recovery works from macOS without opening SSH | Production `remote-control-recover.sh` with one corrupted and two valid payload executions | Fake Azure CLI executing the remote payload plus Run-Command-scoped remote filesystem commands | Checksum-before-install refusal, exact VM Run Command target, one content-verified install from an outdated helper, two admin-user recovery calls, byte-identical final target, and absence of NSG rule creation |
-| Backup and delete protection cover workspace | Production Terraform root plan plus source guard | Azure providers | VM backup LUN, management-lock assertions, and Terraform destruction guard |
-| Temporary SSH is exact and recoverable | Production `ssh-open.sh` and `ssh-close.sh` subprocesses | Fake Azure CLI and public-IP endpoint | Rule/state query and deletion read-back |
-| VS Code can tunnel only during temporary SSH | Rendered production cloud-init | Azure provider | Local-only TCP forwarding with gateway ports and network-device tunnels disabled |
-| Mac mount shares the selected VM directory only during access | Production `workspace-open.sh` default, override, invalid-input, and close subprocesses | Fake SSHFS and diskutil | Exact SSHFS argv, absent external state for invalid input, mount state, and unmount-before-rule-delete log |
+| Terraform owns infrastructure only | Terraform production root | Azure providers | No custom data, guest Run Command resource, remote-exec, or permanent ingress |
+| Local machine owns preparation | Embedded machine-preparation helper from `scripts/codex-vm.sh` | Azure CLI/VM agent | Exact target, agent wait, Run Command payload, no SSH/NSG call |
+| VM is prepared by checked-in code | Transmitted `prepare-codex-vm.sh` and helpers | Package/device/system commands | Installed bytes, command log, fstab, package layout, symlinks, services, SSH files, marker |
+| Persistent disk owns Codex state | VM provisioner plus persistent-home helper and dot-codex bootstrap | Block device and SSH | Mount-before-install order, persistent paths, preserved sentinels, exact links |
+| Mac trust follows remote read-back | Embedded machine-preparation helper from `scripts/codex-vm.sh` | Azure CLI | Host key returned by VM fixture and exact local files |
+| Authentication/pairing are launched locally | Local pairing entrypoint | SSH executable | Login/start/pair argv and access cleanup |
+| Reboot recovery remains VM-owned | Installed systemd units plus health helper | systemd/process table | Mount dependencies, enabled units, daemon JSON and signal ordering |
+| Temporary access and workspace are safe | Existing production helpers | Azure CLI, public-IP endpoint, SSHFS, diskutil | Exact `/32` rule, identity-aware deletion, path argv, cleanup order |
 
-## Fake Boundary Ledger
-- Fake: AzureRM/External/Local provider operations, Azure CLI, the remote filesystem boundary used by Run Command, public-IP HTTP response, Codex CLI responses, process-table reads and signals, SSHFS, macOS mount read-back, and diskutil. The Azure CLI fake executes the recovery payload with `base64`, `sha256sum`, `cmp`, `install`, and `runuser` fakes that are enabled only inside the Run Command context, preventing Mac-local reconciliation from manufacturing remote evidence. It injects one corrupted decode and reads back the unchanged target, checksum/install/recovery ordering, installed bytes, write count, and invocation count. It also persists the actual NSG create arguments, derives subsequent show responses from that state, and rejects show/delete requests whose resource-group, NSG, or rule identity differs.
-- Allowed because: This local proof must not create billable resources, expose a real port, authenticate ChatGPT, mount kernel extensions, or mutate a real filesystem.
-- Not faked: Terraform evaluation and cloud-init rendering; the production daemon-health, Azure recovery, access, and mount scripts; their branching, argument construction, PID-record validation, state transitions, cleanup ordering, error behavior, and read-back logic.
-
-## Proof Scope
+## Scope
 Proves:
-- The local configuration defaults to no inbound SSH, plans the managed-disk/backup/daemon ownership, sandbox prerequisite, reboot bootstrap, and timer contract, and drives daemon recovery, Azure Run Command, temporary-access, and mount lifecycles through production script entrypoints.
+- The repository implements a two-phase deployment: Terraform infrastructure first, then one locally launched, read-back-verified preparation command.
+- One-time guest preparation no longer originates from cloud-init or Terraform-managed guest execution.
+- The transmitted production VM code preserves the established disk, Codex persistence, SSH hardening, and runtime recovery invariants.
 
 Does not prove:
-- Live Azure resource availability or replacement behavior, real NSG propagation timing, VM boot/device discovery, systemd execution on Ubuntu, actual `bwrap` execution under the Azure Ubuntu kernel/AppArmor policy, a real zombie process, Azure VM agent availability, paired-device reconnection, disk persistence, ChatGPT authentication/enrollment, phone discovery, real SSHFS/FUSE behavior, backup completion, restore, or Azure Files data migration.
+- Live Azure apply/replacement behavior, VM-agent availability, real managed-disk formatting or mounting, apt/package network behavior, live AppArmor/systemd/sshd behavior, ChatGPT authentication, real pairing, paired-device reconnection, backup/restore, or real SSHFS.
 
 False-green risks:
-- Provider mocks can accept a field combination that Azure rejects at apply time.
-- Rendered cloud-init can contain the correct packages and AppArmor setup while a future Ubuntu package or kernel change still prevents `bwrap` from creating a namespace.
-- Rendered systemd units can be valid in source while a live boot ordering, VM-agent, authentication, or outbound-network failure still prevents reconnection.
-- Fake process responses cannot reproduce every PID namespace or process-state race. The proof does reproduce the observed standalone symlink, byte-identical backup executable, and different-executable cases; the recovery script still refuses ambiguous records.
-- Fake command responses cannot reproduce every Azure CLI or macOS FUSE failure mode.
-- The fake remote filesystem cannot prove root ownership or a live Azure Run Command shell, but it executes the production payload in an isolated remote-command context and rejects checksum ordering, content, destination, mode, user, or idempotency mismatches.
-- The user could leave a real temporary rule open if the Mac loses power before cleanup; Azure Defender JIT is required for server-enforced expiry.
+- Provider mocks can accept a Terraform field combination rejected by Azure.
+- The isolated VM filesystem and fake device commands cannot reproduce kernel, udev, AppArmor, systemd, apt-lock, or Run Command extension races.
+- Action Run Command returns only bounded final output and allows one active command; a live preparation run can still fail because another command is active or the VM lacks required outbound connectivity.
+- The local pairing proof verifies command ownership and cleanup but cannot complete a real device-code or phone pairing flow.
 
-Evidence strength:
-- deterministic configuration and subprocess lifecycle proof with live Azure, Remote Control, and FUSE gaps
+Evidence method:
+- Deterministic configuration, subprocess, real Git/package/filesystem, and provider-boundary proof.
+
+Known gaps:
+- Live Azure, VM agent, kernel/device, authentication, pairing, backup, restore, and FUSE behavior require an explicitly approved deployment and manual validation.
 
 ## Secondary Guards
 - `terraform fmt -check -recursive`
 - `terraform validate`
-- `bash -n` for every production and proof shell script
+- `bash -n` for production and proof scripts
 - `git diff --check`
-- Markdown link/path review for the README and architecture note
+- README and architecture path review
 
-## Environment And Data
-- Terraform 1.14+, initialized provider cache, Bash, Python 3, `jq`, and standard command stubs created under a temporary proof directory.
-- No Azure credentials, ChatGPT credentials, SSH private-key bytes, or live provider state are required.
-
-## Anti-Gaming Review
-- Fake pass risk: leave the original wildcard TCP/22 rule while adding an open/close helper. Proof catch: the Terraform plan requires no configured NSG security rule.
-- Fake pass risk: call a disk resource a workspace but keep cloud-init on Azure Files, the OS disk, or the old `/workspace` path. Proof catch: the plan and rendered cloud-init require the managed LUN, ext4, UUID fstab entry, exact `/home/azureadmin/projects` output, and SSHFS argv read-back.
-- Fake pass risk: bootstrap the daemon as root. Proof catch: rendered cloud-init must invoke the exact command through `runuser` with the admin home and must not use `/root/.codex`.
-- Fake pass risk: rely on Codex's bundled `bwrap` fallback while omitting the host sandbox prerequisites. Proof catch: rendered cloud-init must install the distribution packages, verify `bwrap`, and load the Ubuntu 24.04 AppArmor profile.
-- Fake pass risk: write systemd unit files but never enable them. Proof catch: rendered cloud-init must reload systemd, enable the reboot service and timer, and start the timer after initial bootstrap.
-- Fake pass risk: recover any timeout by broadly killing Codex processes. Proof catch: the stale scenario requires supported lifecycle calls before signaling and exact daemon PID record, process start time, user, versioned command role, byte-identical live executable, zombie state, and parent relationship; each predicate is independently falsified and must send no signal.
-- Fake pass risk: call the SSH helper from an apparent Azure recovery command. Proof catch: the production recovery helper must cross `az vm run-command invoke`, its remote payload must execute, and the call log must contain no NSG create.
-- Fake pass risk: assume a preinstalled VM recovery helper or reinstall it on every Mac invocation. Proof catch: the remote target starts outdated, must become byte-identical to the checked-in helper after the first invocation, must record exactly one install across two invocations, and must record two admin-user recovery calls.
-- Fake pass risk: reconcile through Mac-local fake commands or calculate a checksum without enforcing it before install. Proof catch: remote commands reject calls outside the Run Command context, while a corrupted decode must leave the outdated target unchanged with no install or recovery event.
-- Fake pass risk: manufacture a safe NSG read-back independently of unsafe production create arguments. Proof catch: the Azure fake persists every create argument, drives show responses from that state, and the proof requires the complete expected inbound TCP/22 request.
-- Fake pass risk: remove the access-state file or wrong Azure rule while leaving temporary ingress open. Proof catch: identity-aware show/delete operations preserve state on any target mismatch, and close verifies the intended provider rule is absent before state removal.
-- Fake pass risk: accept a remote-path argument but ignore it or validate it only after opening SSH. Proof catch: the fake executable records exact default and override argv, while invalid relative and extra arguments must leave the NSG, access, mount, and call state untouched.
-- Broken implementation that would still pass: Azure could change provider/runtime behavior after the pinned local versions; a reviewed live plan/apply and runtime receipt remain necessary.
+## Environment
+- Terraform 1.14+, Bash, Python 3, `jq`, Git, tar, and standard command fakes under a temporary proof directory.
+- No Azure, ChatGPT, SSH-private-key, or live provider credentials are required.
+- Runner stdout prints Terraform and Bash versions and the mocked-provider/subprocess mode.
 
 ## Proof Repair History
-
-- 2026-07-23 VS Code Remote-SSH failure: the VS Code Server installed and started, but the SSH daemon rejected its dynamic tunnel with `administratively prohibited` because rendered cloud-init set `AllowTcpForwarding no`.
-- Strengthened proof decision: inspect rendered cloud-init through the Terraform test and require the narrow `local` forwarding mode together with `GatewayPorts no` and `PermitTunnel no`; reject disabled, unrestricted, or remote-only TCP forwarding.
-- Red evidence: captured attempt `proof/runs/20260723T192326433683Z` fails the rendered-cloud-init assertion against the pre-change `AllowTcpForwarding no` policy.
-- 2026-07-23 user correction: `scripts/remote-control-recover.sh` is the Mac-owned entrypoint and must not depend on a separately deployed VM helper version. The revised proof starts with an outdated remote target, executes the production Azure Run Command payload twice, and requires one content-verified install, two recovery invocations, and a byte-identical final target.
-- Strengthened proof decision: embed the exact checked-in VM helper and SHA-256 in the Run Command payload, verify the decoded content on the VM, compare it to the fixed privileged target, install only on byte mismatch, and invoke that target as `azureadmin`.
-- Red evidence: captured attempt `proof/runs/20260723T170223963751Z` reaches the outdated VM helper through the pre-change invoke-only Mac script and fails because no checked-in helper bytes were verified or installed.
-- Proof realism refinement after the first passing attempt: declare the embedded payload as `/bin/sh`, use POSIX trap syntax, and execute it through `sh` at the fake Azure boundary so success does not depend on the Mac harness supplying Bash.
-- Evaluator correction after attempt `proof/runs/20260723T170709151490Z`: remote command fakes were globally visible to the Mac subprocess and checksum-before-install ordering was inferred only from final bytes. The repaired boundary enables those fakes only while Azure executes the remote payload and injects corrupted decoded content that must fail before installation or invocation.
-- Red evidence: captured attempt `proof/runs/20260723T171414578276Z` temporarily bypasses the production checksum comparison; the corrupted payload reaches installation, changes the outdated target, and fails the strengthened pre-install invariant.
-- 2026-07-23 runtime failure: Remote Control remained healthy after the only `codex_models_manager` warning, then failed immediately after the live `~/.codex` directory was replaced by a symlink to `~/dot-codex`. The updater retained a byte-identical executable from `.codex.backup-2026-07-23`, its app-server child became defunct, and supported restart timed out.
-- Strengthened proof decision: model the standalone `current` symlink, versioned updater argv, canonical managed-daemon path, and `/proc/<updater>/exe` as a separate byte-identical backup copy. Recovery must accept that verified Codex executable but independently reject different executable content. This closes the previous fake-boundary gap without allowing broad process termination.
-- Red evidence: captured attempt `proof/runs/20260723T164723140278Z` fails after the fake daemon reports the canonical versioned release path because the pre-repair helper requires literal `current/codex` strings and cannot verify the byte-identical backup executable.
-- 2026-07-22 user expansion: `workspace-open.sh` must optionally mount the VM user folder instead of always selecting the projects mount. The revised proof drives the production script with no argument, invalid input, and `/home/azureadmin`, then reads exact SSHFS argv and external state so an ignored or late-validated override fails.
-- 2026-07-22 user correction: the persistent workspace must mount directly at `/home/azureadmin/projects`, not `/workspace`. The revised proof requires the exact Terraform output and rendered cloud-init path and drives the real SSHFS helper with that output; this changes the mount location without reintroducing Azure Files.
-- 2026-07-20 evaluator correction: the Azure fake removed rule state for any delete and answered show requests without matching resource-group, NSG, or rule identity. The corrected boundary rejects wrong-target show/delete calls and leaves the intended rule present for recovery.
-- Red evidence: captured attempt `proof/runs/20260720T201928314810Z` changes the production close helper to delete a different rule name; identity-aware Azure deletion rejects it and the proof fails with the temporary rule still present.
-- 2026-07-20 evaluator correction: the Azure fake previously returned hard-coded safe NSG values after any create request, so wildcard, UDP, or outbound production arguments could pass. The corrected fake persists the actual create arguments, uses them for read-back, and requires the complete inbound `/32` TCP/22 request.
-- Red evidence: captured attempt `proof/runs/20260720T201257859809Z` changes the production temporary rule from TCP to UDP; the persisted Azure create request exposes the mismatch and the proof fails.
-- 2026-07-20 evaluator correction: the first recovery proof falsified only the updater command, so a script that ignored updater/app-server user, start-time, zombie-state, or parent predicates—or signaled before supported lifecycle recovery—could pass. The accepted strengthened proof independently falsifies all seven predicates and asserts the full supported-recovery-before-signal ordering.
-- Red evidence: captured attempt `proof/runs/20260720T200620492957Z` removes updater-user validation from the production recovery script; the strengthened proof fails because that mismatch reaches the signal path.
-- 2026-07-20 recovery expansion: upstream Codex documents the detached updater as not reboot-persistent, and the production incident showed that supported restart could time out on a defunct child. The accepted proof adds reboot bootstrap, a one-minute health path, safe exact stale-parent recovery, an Azure Run Command helper, and a negative mismatched-PID scenario. This expands behavior rather than weakening the existing daemon, storage, or access proof.
-- Red evidence: captured attempt `proof/runs/20260720T195133569543Z` fails the new Terraform assertions because the pre-change cloud-init has no reboot bootstrap/health timer and the connection output has no VM name for Azure Run Command.
-- 2026-07-20 runtime failure: `codex remote-control start` could not create `app-server-control.sock`; the only daemon stderr entry reported that `bubblewrap` was absent. After `bubblewrap` and the Ubuntu AppArmor profile were installed, the original July 17 updater still held a defunct app-server child and could not restart it. Terminating that verified stale updater allowed the supported Remote Control start to create the socket and report matching CLI/app-server version `0.144.6`.
-- Root cause: cloud-init omitted the documented Linux sandbox prerequisites before its first daemon bootstrap. The previous proof validated daemon ownership and executable location but could pass while the host lacked `bwrap` and its Ubuntu 24.04 AppArmor profile.
-- Strengthened proof: rendered cloud-init must install `bubblewrap`, `apparmor-profiles`, and `apparmor-utils`, verify `bwrap` on `PATH`, copy the distribution `bwrap-userns-restrict` profile, load that profile, and prove both operations precede daemon bootstrap. Live read-back confirmed the distribution `bwrap` namespace smoke test, loaded AppArmor profiles, a fresh control socket, and a running managed daemon.
-- Evaluator correction: the first sandbox assertion checked only token presence, so a configuration that omitted the profile copy or loaded the profile after bootstrap could pass. The corrected Terraform assertion matches the copy, load, and bootstrap sequence in the rendered cloud-init.
-- Red evidence: captured attempt `proof/runs/20260720T165128980789Z` removes the profile-copy operation and fails the corrected sandbox-prerequisite assertion. Earlier attempts `proof/runs/20260720T164102220324Z` and `proof/runs/20260720T164151983098Z` are retained but are not the focused red because their Terraform run also reports the fixture's intentional artifact SHA mismatch.
-- 2026-07-17 pre-commit evaluation found that `storage.tf` set `prevent_destroy = false` even though the feature and architecture require a Terraform destruction guard. The previous proof checked only the Azure management lock, so it could pass while a normal Terraform destroy remained able to remove the disk after deleting the lock. The proof now requires the production managed-disk source to enable `prevent_destroy`; this fails against the pre-repair configuration without changing feature scope.
-- 2026-07-17 runtime failure: `codex remote-control start` reported that the managed standalone install was missing from `/home/azureadmin/.codex/packages/standalone/current/codex`.
-- Root cause: the verified package layout was correct, but cloud-init installed it under `/opt/codex`; the previous proof checked daemon ownership and bootstrap invocation without proving that the daemon's required per-user executable existed.
-- Strengthened proof: rendered cloud-init must publish and verify `azureadmin`'s managed standalone executable, must not use `/opt/codex`, and the installer proof must execute `packages/standalone/current/codex`. This adds the missed runtime invariant without reducing feature scope.
-- Red evidence: captured run `proof/runs/20260717T071022Z` fails the new Terraform assertion against the pre-repair `/opt/codex` implementation.
+- 2026-07-24 live preparation failure: Azure Run Command sequence 1 exited 255 after completing packages, AppArmor, workspace mount, runtime units, persistent Codex installation, and CLI publication. Its retained stderr identifies `Missing privilege separation directory: /run/sshd`; the old local helper then hid that detail behind a generic missing-readiness error.
+- Strengthened proof decision: make the isolated `sshd -t` boundary require the fresh-host runtime directory and require a bounded remote diagnostic to reach local stderr when readiness read-back fails.
+- 2026-07-24 live rerun: after creating `/run/sshd`, validation passed but final activation failed with `ssh.service is not active, cannot reload.` Read-back confirmed Ubuntu 24.04 has active/enabled `ssh.socket` with inactive/disabled `ssh.service`, so reconciliation must preserve socket activation, reload only an active service, and start SSH only when neither unit is active.
+- Evaluator correction after attempt `proof/runs/20260724T195256416123Z`: the proof exercised socket preservation and service startup but did not require reload when `ssh.service` was active; its small diagnostic also could not distinguish a 4096-character tail from unbounded output. The strengthened scenario drives the active-service branch and uses an oversized response with an omitted-prefix sentinel plus an exact extracted-length ceiling.
+- Red evidence: attempts `proof/runs/20260724T195905115561Z` and `proof/runs/20260724T195931774177Z` temporarily print the complete oversized response and skip active-service reload respectively; each fails only its strengthened invariant before the production behavior is restored.
+- 2026-07-24 user correction: Terraform must create infrastructure first, while every one-time preparation or authentication action is launched from the local machine rather than automatically by cloud-init or a Terraform guest command.
+- Revised behavior decision: remove guest preparation and SSH host-key capture from Terraform, add one local preparation entrypoint using Azure Run Command, add a local authentication/pairing entrypoint, and retain systemd only as the post-preparation reboot/runtime exception.
+- Revised proof decision: reject Terraform custom data and guest Run Command resources, execute the real local preparation entrypoint through a fake Azure CLI that runs its actual transmitted payload in an isolated VM filesystem, then read back both VM and Mac state. The earlier rendered-cloud-init proof is no longer sufficient because it proves the rejected owner.
+- Proof realism refinement before evaluation: corrupt the first transmitted helper at the remote decode boundary and suppress the successful VM readiness marker in a separate run. Both cases must fail without creating local SSH trust files; checksum corruption must fail before the VM preparation marker exists.
+- Evaluator correction after attempt `proof/runs/20260724T082455151842Z`: the preparation Azure fake accepted any subscription, resource group, VM, and command ID, while the dot-codex missing-login path still directed users to authenticate on the VM. The strengthened boundary rejects every wrong Azure target field and requires the Mac-owned `scripts/codex-vm.sh pair` instruction.
+- 2026-07-23 persistence correction: Codex installation and state must survive VM replacement on the managed projects disk. The retained persistent-home and dot-codex scenarios continue to require the physical home and CLI under `/home/azureadmin/projects`.
+- Earlier retained runs document the stale-daemon, verified-helper reconciliation, temporary-access identity, SSH forwarding, managed-disk destruction guard, and verified-installer proof repairs. This correction changes deployment ownership without weakening those safety invariants.
 
 ## Manual Gaps
-- A reviewed `terraform plan` and explicitly approved live apply are required before claiming the Azure deployment works.
-- After apply, verify `cloud-init status --wait`, `command -v bwrap`, the loaded `bwrap` AppArmor profile, systemd unit/timer state, a VM reboot, daemon version, paired-device reconnection, Azure Run Command recovery, `findmnt /home/azureadmin/projects`, disk UUID/attachment, temporary NSG closure, real SSHFS mount/unmount, backup protection, and restore readiness.
+- After a reviewed and approved manual `terraform apply`, run `scripts/codex-vm.sh setup` from the repository root and inspect its exact VM identity and readiness receipt.
+- Then run the local pairing helper and verify device login, Remote Control connectivity, pairing, VM reboot recovery, `findmnt /home/azureadmin/projects`, the loaded AppArmor profile, systemd units/timer, backup protection, and a restore drill.

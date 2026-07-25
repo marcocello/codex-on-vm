@@ -8,7 +8,6 @@ mock_provider "external" {
     }
   }
 }
-mock_provider "local" {}
 
 variables {
   subscription_id = "00000000-0000-0000-0000-000000000000"
@@ -49,42 +48,39 @@ run "remote_control_managed_workspace_plan" {
   }
 
   assert {
-    condition     = output.connection.workspace_mount_path == "/home/azureadmin/projects" && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "/dev/disk/azure/data/by-lun/0") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "CREATED_PARTITION") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "wipefs --no-act") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "mkfs.ext4") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "UUID=") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "/home/azureadmin/projects")
-    error_message = "Cloud-init must prepare the managed LUN as ext4 and persist the /home/azureadmin/projects mount by UUID."
+    condition     = azurerm_linux_virtual_machine.this.custom_data == null
+    error_message = "Terraform must not launch guest preparation through custom data or cloud-init."
   }
 
   assert {
-    condition     = strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "runuser -u \"$ADMIN_USER\"") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "app-server daemon bootstrap --remote-control") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "app-server daemon bootstrap\n") && !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "/root/.codex")
-    error_message = "Cloud-init must bootstrap the managed daemon as the admin user, never root."
+    condition = (
+      output.connection.vm_name == "prod-codex-on-vm-vm" &&
+      output.connection.ssh_username == "azureadmin" &&
+      output.connection.workspace_mount_path == "/home/azureadmin/projects" &&
+      output.connection.workspace_disk_lun == 0 &&
+      output.connection.codex_version == "0.144.3" &&
+      startswith(output.connection.codex_package_url, "https://") &&
+      length(output.connection.codex_package_sha256) == 64
+    )
+    error_message = "Terraform must expose the non-secret VM, disk, and pinned Codex values consumed by local preparation."
   }
 
   assert {
-    condition     = strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "CODEX_HOME=\"$ADMIN_CODEX_HOME\" \\\n        /usr/local/sbin/install-verified-codex") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "\"$ADMIN_HOME/.codex/packages/standalone/current/codex\"") && !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "/opt/codex")
-    error_message = "Cloud-init must install and verify the managed standalone package under azureadmin's CODEX_HOME, where remote-control start resolves it."
+    condition = (
+      endswith(output.connection.mac_private_key_path, "/.ssh/codex-on-vm-mac") &&
+      endswith(output.connection.ssh_host_config_path, "/.ssh/config.d/codex-on-vm.conf") &&
+      endswith(output.connection.ssh_known_hosts_path, "/.ssh/codex-on-vm-known_hosts")
+    )
+    error_message = "Terraform must expose the local SSH paths written only after preparation read-back."
   }
 
   assert {
-    condition     = strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "  - bubblewrap") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "  - apparmor-profiles") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "  - apparmor-utils") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "command -v bwrap") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict") && length(regexall("(?s)install -m 0644 \"[$]BWRAP_PROFILE_SOURCE\" \"[$]BWRAP_PROFILE_TARGET\".*apparmor_parser -r \"[$]BWRAP_PROFILE_TARGET\".*app-server daemon bootstrap --remote-control", base64decode(azurerm_linux_virtual_machine.this.custom_data))) == 1
-    error_message = "Cloud-init must install bubblewrap and load the Ubuntu 24.04 AppArmor profile before starting the Codex daemon."
+    condition     = !can(regex("(?i)cloud-init|on the vm run|ssh-open|scripts/prepare-machine[.]sh|scripts/codex-pair[.]sh|scripts/codex-vm[.]sh (prepare|sync-config|repair)", output.next_steps)) && strcontains(output.next_steps, "interactive workflows ask before running setup") && strcontains(output.next_steps, "non-interactive commands stop") && strcontains(output.next_steps, "scripts/codex-vm.sh setup") && strcontains(output.next_steps, "scripts/codex-vm.sh pair") && strcontains(output.next_steps, "scripts/codex-vm.sh dot-codex")
+    error_message = "Terraform must direct the operator through the local Codex VM console instead of VM-launched or legacy setup instructions."
   }
 
   assert {
-    condition     = length(regexall("(?m)^[[:space:]]+AllowTcpForwarding local$", base64decode(azurerm_linux_virtual_machine.this.custom_data))) == 1 && !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "AllowTcpForwarding no") && !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "AllowTcpForwarding yes") && !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "AllowTcpForwarding all") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "GatewayPorts no") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "PermitTunnel no")
-    error_message = "Cloud-init must permit only client-originated TCP forwarding for VS Code while keeping gateway ports and network-device tunnels disabled."
-  }
-
-  assert {
-    condition     = strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "/usr/local/sbin/ensure-codex-remote-control") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "codex-remote-control-bootstrap.service") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "codex-remote-control-health.service") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "codex-remote-control-health.timer") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "After=network-online.target") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "User=azureadmin") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "OnUnitInactiveSec=1min") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "Persistent=true") && length(regexall("(?s)app-server daemon bootstrap --remote-control.*systemctl daemon-reload.*systemctl enable codex-remote-control-bootstrap[.]service codex-remote-control-health[.]timer.*systemctl start codex-remote-control-health[.]timer", base64decode(azurerm_linux_virtual_machine.this.custom_data))) == 1
-    error_message = "Cloud-init must install reboot bootstrap and a one-minute managed-daemon health timer without creating another app-server owner."
-  }
-
-  assert {
-    condition     = !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "azfilesauth") && !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "sec=krb5") && !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "mount.cifs")
-    error_message = "The VM workspace must no longer depend on Azure Files or SMB authentication."
-  }
-
-  assert {
-    condition     = output.connection.vm_name == "prod-codex-on-vm-vm"
-    error_message = "The connection output must expose the VM name required by Azure Run Command recovery."
+    condition     = endswith(data.external.ssh_keys.program[1], "/scripts/codex-vm.sh") && data.external.ssh_keys.program[2] == "__terraform-ensure-ssh-keys"
+    error_message = "Terraform SSH-key preparation must use the private unified-console entrypoint."
   }
 }

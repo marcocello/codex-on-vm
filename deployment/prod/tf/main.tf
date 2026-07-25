@@ -53,7 +53,11 @@ locals {
 }
 
 data "external" "ssh_keys" {
-  program = ["bash", "${path.module}/scripts/ensure-ssh-keys.sh"]
+  program = [
+    "bash",
+    abspath("${path.module}/../../../scripts/codex-vm.sh"),
+    "__terraform-ensure-ssh-keys",
+  ]
 
   query = {
     mac_private_key_path = local.ssh_key_paths.mac_private

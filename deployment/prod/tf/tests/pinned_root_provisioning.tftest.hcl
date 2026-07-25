@@ -8,8 +8,6 @@ mock_provider "external" {
     }
   }
 }
-mock_provider "local" {}
-
 variables {
   subscription_id = "00000000-0000-0000-0000-000000000000"
   owner           = "provisioning-proof"
@@ -24,23 +22,18 @@ run "pinned_root_provisioning_plan" {
   }
 
   assert {
-    condition     = strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "https://github.com/openai/codex/releases/download/rust-v0.144.3/codex-package-x86_64-unknown-linux-musl.tar.gz") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "1c3c1f1f636da56a197ce0b5084d44b86f58f0fb32983278fa55c2544d221af4")
-    error_message = "Cloud-init must declare the exact Codex 0.144.3 package URL and SHA-256 digest."
+    condition     = output.connection.codex_version == "0.144.3" && output.connection.codex_package_url == "https://github.com/openai/codex/releases/download/rust-v0.144.3/codex-package-x86_64-unknown-linux-musl.tar.gz" && output.connection.codex_package_sha256 == "1c3c1f1f636da56a197ce0b5084d44b86f58f0fb32983278fa55c2544d221af4"
+    error_message = "Terraform must expose the exact Codex 0.144.3 package URL and SHA-256 digest to local preparation."
   }
 
   assert {
-    condition     = strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "fetch-verified-artifact") && strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "sha256")
-    error_message = "Cloud-init must use the repository-owned verified artifact boundary."
+    condition     = azurerm_linux_virtual_machine.this.custom_data == null
+    error_message = "Terraform must not activate root installation through custom data."
   }
 
   assert {
-    condition     = !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "https://chatgpt.com/codex/install.sh") && !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "CODEX_RELEASE:-latest")
-    error_message = "Cloud-init must not execute the mutable Codex installer."
-  }
-
-  assert {
-    condition     = strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "\"$ADMIN_HOME/.codex/packages/standalone/current/codex\"") && !strcontains(base64decode(azurerm_linux_virtual_machine.this.custom_data), "/opt/codex")
-    error_message = "The verified package must be published in the managed standalone path used by the azureadmin daemon."
+    condition     = !strcontains(output.connection.codex_package_url, "install.sh") && !strcontains(output.connection.codex_package_url, "latest")
+    error_message = "Terraform must not expose a mutable Codex installer to local preparation."
   }
 
 }

@@ -6,13 +6,33 @@ TF_DIR="$ROOT/deployment/prod/tf"
 REAL_PATH="$PATH"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+OPERATOR_ROOT="$TMP/operator-root"
+CODEX_VM_TEST_MODE=1 "$ROOT/scripts/codex-vm.sh" __extract-helpers "$OPERATOR_ROOT"
+OPERATOR_SCRIPTS="$OPERATOR_ROOT/scripts"
+VM_SCRIPTS="$OPERATOR_ROOT/vm-scripts"
+
+fail() {
+  printf 'Remote-control managed workspace proof failed: %s\n' "$1" >&2
+  exit 1
+}
 
 printf 'Terraform runtime: %s\n' "$(terraform version | sed -n '1p')"
 printf 'Shell runtime: bash %s\n' "$BASH_VERSION"
 printf 'Proof mode: mocked Azure providers with production Terraform and operator scripts\n'
 
 "$ROOT/docs/features/pinned-root-provisioning/proof/run.sh"
+"$ROOT/docs/features/dot-codex-vm-bootstrap/proof/run.sh"
 terraform -chdir="$TF_DIR" test -filter=tests/remote_control_managed_workspace.tftest.hcl
+
+if rg -n '^[[:space:]]*custom_data[[:space:]]*=' "$TF_DIR" --glob '*.tf' >/dev/null; then
+  fail "Terraform must not launch guest preparation through custom data"
+fi
+if rg -n 'resource[[:space:]]+"azurerm_virtual_machine_run_command"|provisioner[[:space:]]+"remote-exec"|resource[[:space:]]+"local_file"' \
+  "$TF_DIR" --glob '*.tf' >/dev/null; then
+  fail "Terraform must not own guest preparation or post-provision local SSH files"
+fi
+[[ ! -e "$TF_DIR/templates/cloud-init.yaml" ]] ||
+  fail "the rejected cloud-init preparation template is still present"
 
 if rg -n '^[[:space:]]*security_rule[[:space:]]*[{=]' "$TF_DIR/networking.tf" >/dev/null; then
   printf 'production NSG must not contain an inline security rule\n' >&2
@@ -27,10 +47,79 @@ if ! rg -n '^[[:space:]]*prevent_destroy[[:space:]]*=[[:space:]]*true[[:space:]]
   exit 1
 fi
 
-for script in remote-control-recover.sh ssh-open.sh ssh-close.sh workspace-open.sh workspace-close.sh; do
-  [[ -x "$ROOT/scripts/$script" ]]
+for script in prepare-machine.sh codex-pair.sh remote-control-recover.sh ssh-open.sh ssh-close.sh workspace-open.sh workspace-close.sh; do
+  [[ -x "$OPERATOR_SCRIPTS/$script" ]]
 done
-[[ -x "$TF_DIR/scripts/ensure-codex-remote-control.sh" ]]
+[[ -x "$VM_SCRIPTS/ensure-codex-remote-control.sh" ]]
+[[ -x "$VM_SCRIPTS/prepare-codex-vm.sh" ]]
+CODEX_HOME_HELPER="$VM_SCRIPTS/prepare-persistent-codex-home.sh"
+[[ -x "$CODEX_HOME_HELPER" ]] || fail "persistent Codex home helper is unavailable"
+
+"$ROOT/docs/features/remote-control-managed-workspace/proof/prepare-machine-scenario.sh" "$OPERATOR_ROOT" "$TMP"
+
+ADMIN_USER="$(id -un)"
+
+FRESH_FIXTURE="$TMP/codex-home-fresh"
+mkdir -p "$FRESH_FIXTURE/home" "$FRESH_FIXTURE/projects"
+FRESH_SELECTED="$("$CODEX_HOME_HELPER" "$ADMIN_USER" "$FRESH_FIXTURE/home" "$FRESH_FIXTURE/projects")" ||
+  fail "fresh persistent Codex home preparation failed"
+[[ "$FRESH_SELECTED" == "$FRESH_FIXTURE/projects/.codex" ]] ||
+  fail "fresh state selected $FRESH_SELECTED"
+[[ -d "$FRESH_SELECTED" && -L "$FRESH_FIXTURE/home/.codex" ]] ||
+  fail "fresh state did not create the persistent home and compatibility link"
+[[ "$(readlink -f "$FRESH_FIXTURE/home/.codex")" == "$(readlink -f "$FRESH_SELECTED")" ]] ||
+  fail "fresh compatibility link resolves to the wrong home"
+
+EXISTING_FIXTURE="$TMP/codex-home-existing"
+mkdir -p "$EXISTING_FIXTURE/home" "$EXISTING_FIXTURE/projects/.codex"
+printf 'preserved auth\n' >"$EXISTING_FIXTURE/projects/.codex/auth.json"
+EXISTING_SELECTED="$("$CODEX_HOME_HELPER" "$ADMIN_USER" "$EXISTING_FIXTURE/home" "$EXISTING_FIXTURE/projects")" ||
+  fail "existing persistent Codex home preparation failed"
+[[ "$EXISTING_SELECTED" == "$EXISTING_FIXTURE/projects/.codex" ]] ||
+  fail "existing state selected $EXISTING_SELECTED"
+[[ "$(cat "$EXISTING_SELECTED/auth.json")" == "preserved auth" ]] ||
+  fail "existing persistent authentication state changed"
+[[ "$(readlink -f "$EXISTING_FIXTURE/home/.codex")" == "$(readlink -f "$EXISTING_SELECTED")" ]] ||
+  fail "existing-state compatibility link resolves to the wrong home"
+
+DOT_FIXTURE="$TMP/codex-home-dot-codex"
+mkdir -p "$DOT_FIXTURE/home" "$DOT_FIXTURE/projects/.codex" "$DOT_FIXTURE/projects/dot-codex/.git"
+printf 'older persistent state\n' >"$DOT_FIXTURE/projects/.codex/state.txt"
+printf 'active dot-codex auth\n' >"$DOT_FIXTURE/projects/dot-codex/auth.json"
+DOT_SELECTED="$("$CODEX_HOME_HELPER" "$ADMIN_USER" "$DOT_FIXTURE/home" "$DOT_FIXTURE/projects")" ||
+  fail "existing dot-codex home preparation failed"
+[[ "$DOT_SELECTED" == "$DOT_FIXTURE/projects/dot-codex" ]] ||
+  fail "dot-codex state selected $DOT_SELECTED"
+[[ "$(cat "$DOT_SELECTED/auth.json")" == "active dot-codex auth" ]] ||
+  fail "active dot-codex authentication state changed"
+[[ "$(cat "$DOT_FIXTURE/projects/.codex/state.txt")" == "older persistent state" ]] ||
+  fail "inactive persistent state was deleted or changed"
+[[ "$(readlink -f "$DOT_FIXTURE/home/.codex")" == "$(readlink -f "$DOT_SELECTED")" ]] ||
+  fail "dot-codex compatibility link resolves to the wrong home"
+
+REAL_HOME_FIXTURE="$TMP/codex-home-real"
+mkdir -p "$REAL_HOME_FIXTURE/home/.codex" "$REAL_HOME_FIXTURE/projects"
+printf 'do not overwrite\n' >"$REAL_HOME_FIXTURE/home/.codex/auth.json"
+if "$CODEX_HOME_HELPER" "$ADMIN_USER" "$REAL_HOME_FIXTURE/home" "$REAL_HOME_FIXTURE/projects"; then
+  printf 'persistent Codex home helper must reject a real ~/.codex directory\n' >&2
+  exit 1
+fi
+[[ "$(cat "$REAL_HOME_FIXTURE/home/.codex/auth.json")" == "do not overwrite" ]] ||
+  fail "real ~/.codex state changed after refusal"
+[[ ! -e "$REAL_HOME_FIXTURE/projects/.codex" ]] ||
+  fail "real ~/.codex refusal created persistent state"
+
+MISMATCH_FIXTURE="$TMP/codex-home-mismatch"
+mkdir -p "$MISMATCH_FIXTURE/home" "$MISMATCH_FIXTURE/projects/.codex" "$MISMATCH_FIXTURE/unrelated"
+ln -s "$MISMATCH_FIXTURE/unrelated" "$MISMATCH_FIXTURE/home/.codex"
+if "$CODEX_HOME_HELPER" "$ADMIN_USER" "$MISMATCH_FIXTURE/home" "$MISMATCH_FIXTURE/projects"; then
+  printf 'persistent Codex home helper must reject a mismatched ~/.codex symlink\n' >&2
+  exit 1
+fi
+[[ "$(readlink "$MISMATCH_FIXTURE/home/.codex")" == "$MISMATCH_FIXTURE/unrelated" ]] ||
+  fail "mismatched ~/.codex symlink changed after refusal"
+
+printf 'Persistent Codex home fixtures: fresh, existing, dot-codex, real-home refusal, mismatched-link refusal\n'
 
 FAKE_BIN="$TMP/bin"
 CALL_LOG="$TMP/calls.log"
@@ -410,7 +499,7 @@ export FAKE_BIN
 export FAKE_REMOTE_HELPER_TARGET="$REMOTE_HELPER_TARGET"
 export FAKE_REMOTE_INSTALL_COUNT="$REMOTE_INSTALL_COUNT"
 export FAKE_REMOTE_RECOVERY_COUNT="$REMOTE_RECOVERY_COUNT"
-export FAKE_EXPECTED_REMOTE_HELPER="$TF_DIR/scripts/ensure-codex-remote-control.sh"
+export FAKE_EXPECTED_REMOTE_HELPER="$VM_SCRIPTS/ensure-codex-remote-control.sh"
 export CODEX_SSH_STATE_FILE="$ACCESS_STATE"
 export CODEX_WORKSPACE_LOCAL_MOUNT_PATH="$MOUNT_PATH"
 
@@ -480,7 +569,7 @@ export CODEX_RECOVERY_KILL="$FAKE_BIN/kill"
 export CODEX_RECOVERY_SLEEP="$FAKE_BIN/sleep"
 
 : >"$CALL_LOG"
-FAKE_CODEX_MODE=healthy "$TF_DIR/scripts/ensure-codex-remote-control.sh"
+FAKE_CODEX_MODE=healthy "$VM_SCRIPTS/ensure-codex-remote-control.sh"
 rg -F 'codex remote-control start --json' "$CALL_LOG" >/dev/null
 if rg -F 'codex app-server daemon restart' "$CALL_LOG" >/dev/null || rg -F 'kill ' "$CALL_LOG" >/dev/null; then
   printf 'healthy daemon recovery must not restart or signal a process\n' >&2
@@ -488,13 +577,13 @@ if rg -F 'codex app-server daemon restart' "$CALL_LOG" >/dev/null || rg -F 'kill
 fi
 
 : >"$CALL_LOG"
-FAKE_CODEX_MODE=stopped "$TF_DIR/scripts/ensure-codex-remote-control.sh"
+FAKE_CODEX_MODE=stopped "$VM_SCRIPTS/ensure-codex-remote-control.sh"
 rg -F 'codex remote-control start --json' "$CALL_LOG" >/dev/null
 rg -F 'codex app-server daemon version' "$CALL_LOG" >/dev/null
 
 : >"$CALL_LOG"
 rm -f "$PARENT_TERMINATED"
-FAKE_CODEX_MODE=stale "$TF_DIR/scripts/ensure-codex-remote-control.sh"
+FAKE_CODEX_MODE=stale "$VM_SCRIPTS/ensure-codex-remote-control.sh"
 rg -F 'codex app-server daemon restart' "$CALL_LOG" >/dev/null
 rg -F 'kill -TERM 22420' "$CALL_LOG" >/dev/null
 [[ -f "$PARENT_TERMINATED" ]]
@@ -525,7 +614,7 @@ for mismatch in \
   if [[ "$mismatch" == "mismatch_updater_executable" ]]; then
     ln -sfn "$UNRELATED_CODEX" "$FAKE_PROC_ROOT/22420/exe"
   fi
-  if FAKE_CODEX_MODE="$mismatch" "$TF_DIR/scripts/ensure-codex-remote-control.sh"; then
+  if FAKE_CODEX_MODE="$mismatch" "$VM_SCRIPTS/ensure-codex-remote-control.sh"; then
     printf '%s must not be recovered automatically\n' "$mismatch" >&2
     exit 1
   fi
@@ -544,7 +633,7 @@ printf '#!/usr/bin/env bash\nexit 99\n' >"$REMOTE_HELPER_OUTDATED"
 cp "$REMOTE_HELPER_OUTDATED" "$REMOTE_HELPER_TARGET"
 chmod 0755 "$REMOTE_HELPER_TARGET"
 rm -f "$REMOTE_INSTALL_COUNT" "$REMOTE_RECOVERY_COUNT"
-if FAKE_REMOTE_CORRUPT_PAYLOAD=1 "$ROOT/scripts/remote-control-recover.sh"; then
+if FAKE_REMOTE_CORRUPT_PAYLOAD=1 "$OPERATOR_SCRIPTS/remote-control-recover.sh"; then
   printf 'corrupted VM helper payload must fail before installation\n' >&2
   exit 1
 fi
@@ -563,11 +652,11 @@ if rg -F 'remote install ' "$CALL_LOG" >/dev/null || rg -F 'remote runuser ' "$C
 fi
 
 : >"$CALL_LOG"
-"$ROOT/scripts/remote-control-recover.sh"
-"$ROOT/scripts/remote-control-recover.sh"
+"$OPERATOR_SCRIPTS/remote-control-recover.sh"
+"$OPERATOR_SCRIPTS/remote-control-recover.sh"
 rg -F 'az vm run-command invoke --subscription 00000000-0000-0000-0000-000000000000 --resource-group prod-codex-on-vm-rg --name prod-codex-on-vm-vm --command-id RunShellScript --scripts <reconcile-payload> --only-show-errors' "$CALL_LOG" >/dev/null
 [[ "$(rg -c '^az vm run-command invoke ' "$CALL_LOG")" == "2" ]]
-/usr/bin/cmp -s "$TF_DIR/scripts/ensure-codex-remote-control.sh" "$REMOTE_HELPER_TARGET"
+/usr/bin/cmp -s "$VM_SCRIPTS/ensure-codex-remote-control.sh" "$REMOTE_HELPER_TARGET"
 [[ "$(cat "$REMOTE_INSTALL_COUNT")" == "1" ]]
 [[ "$(cat "$REMOTE_RECOVERY_COUNT")" == "2" ]]
 [[ "$(rg -c '^remote install ' "$CALL_LOG")" == "1" ]]
@@ -591,7 +680,7 @@ if rg -F 'network nsg rule create' "$CALL_LOG" >/dev/null; then
   exit 1
 fi
 
-"$ROOT/scripts/ssh-open.sh"
+"$OPERATOR_SCRIPTS/ssh-open.sh"
 [[ -f "$RULE_STATE" && -f "$ACCESS_STATE" ]]
 python3 - "$ACCESS_STATE" "$RULE_STATE" <<'PY'
 import json
@@ -629,18 +718,18 @@ if az network nsg rule delete --resource-group prod-codex-on-vm-rg --nsg-name pr
   exit 1
 fi
 [[ -f "$RULE_STATE" ]]
-if "$ROOT/scripts/workspace-open.sh"; then
+if "$OPERATOR_SCRIPTS/workspace-open.sh"; then
   printf 'expected workspace-open to reject a pre-existing SSH session\n' >&2
   exit 1
 fi
 [[ -f "$RULE_STATE" && -f "$ACCESS_STATE" ]]
-"$ROOT/scripts/ssh-close.sh"
+"$OPERATOR_SCRIPTS/ssh-close.sh"
 [[ ! -e "$RULE_STATE" && ! -e "$ACCESS_STATE" ]]
 
-"$ROOT/scripts/workspace-open.sh"
+"$OPERATOR_SCRIPTS/workspace-open.sh"
 [[ -f "$RULE_STATE" && -f "$ACCESS_STATE" && -f "$MOUNT_STATE" ]]
 rg -F "sshfs codex-on-vm:/home/azureadmin/projects $MOUNT_PATH" "$CALL_LOG" >/dev/null
-"$ROOT/scripts/workspace-close.sh"
+"$OPERATOR_SCRIPTS/workspace-close.sh"
 [[ ! -e "$RULE_STATE" && ! -e "$ACCESS_STATE" && ! -e "$MOUNT_STATE" ]]
 python3 - "$CALL_LOG" <<'PY'
 import pathlib
@@ -653,7 +742,7 @@ assert unmount < delete
 PY
 
 : >"$CALL_LOG"
-if "$ROOT/scripts/workspace-open.sh" relative/path; then
+if "$OPERATOR_SCRIPTS/workspace-open.sh" relative/path; then
   printf 'expected workspace-open to reject a relative remote path\n' >&2
   exit 1
 fi
@@ -664,7 +753,7 @@ if rg -F 'network nsg rule create' "$CALL_LOG" >/dev/null || rg -F 'sshfs ' "$CA
 fi
 
 : >"$CALL_LOG"
-if "$ROOT/scripts/workspace-open.sh" /home/azureadmin /home/azureadmin/projects; then
+if "$OPERATOR_SCRIPTS/workspace-open.sh" /home/azureadmin /home/azureadmin/projects; then
   printf 'expected workspace-open to reject multiple remote paths\n' >&2
   exit 1
 fi
@@ -675,13 +764,13 @@ if rg -F 'network nsg rule create' "$CALL_LOG" >/dev/null || rg -F 'sshfs ' "$CA
 fi
 
 : >"$CALL_LOG"
-"$ROOT/scripts/workspace-open.sh" /home/azureadmin
+"$OPERATOR_SCRIPTS/workspace-open.sh" /home/azureadmin
 [[ -f "$RULE_STATE" && -f "$ACCESS_STATE" && -f "$MOUNT_STATE" ]]
 rg -F "sshfs codex-on-vm:/home/azureadmin $MOUNT_PATH" "$CALL_LOG" >/dev/null
-"$ROOT/scripts/workspace-close.sh"
+"$OPERATOR_SCRIPTS/workspace-close.sh"
 [[ ! -e "$RULE_STATE" && ! -e "$ACCESS_STATE" && ! -e "$MOUNT_STATE" ]]
 
-if FAKE_SSHFS_FAIL=1 "$ROOT/scripts/workspace-open.sh"; then
+if FAKE_SSHFS_FAIL=1 "$OPERATOR_SCRIPTS/workspace-open.sh"; then
   printf 'expected injected SSHFS failure\n' >&2
   exit 1
 fi
@@ -689,13 +778,18 @@ fi
 
 export PATH="$REAL_PATH"
 bash -n \
-  "$ROOT/scripts/ssh-open.sh" \
-  "$ROOT/scripts/ssh-close.sh" \
-  "$ROOT/scripts/remote-control-recover.sh" \
-  "$ROOT/scripts/workspace-open.sh" \
-  "$ROOT/scripts/workspace-close.sh" \
-  "$ROOT/deployment/prod/tf/scripts/ensure-ssh-keys.sh" \
-  "$ROOT/deployment/prod/tf/scripts/ensure-codex-remote-control.sh"
+  "$OPERATOR_SCRIPTS/prepare-machine.sh" \
+  "$OPERATOR_SCRIPTS/codex-pair.sh" \
+  "$OPERATOR_SCRIPTS/ssh-open.sh" \
+  "$OPERATOR_SCRIPTS/ssh-close.sh" \
+  "$OPERATOR_SCRIPTS/remote-control-recover.sh" \
+  "$OPERATOR_SCRIPTS/workspace-open.sh" \
+  "$OPERATOR_SCRIPTS/workspace-close.sh" \
+  "$VM_SCRIPTS/ensure-ssh-keys.sh" \
+  "$VM_SCRIPTS/ensure-codex-remote-control.sh" \
+  "$VM_SCRIPTS/prepare-persistent-codex-home.sh" \
+  "$VM_SCRIPTS/prepare-codex-vm.sh" \
+  "$ROOT/docs/features/remote-control-managed-workspace/proof/prepare-machine-scenario.sh"
 terraform -chdir="$TF_DIR" fmt -check -recursive
 terraform -chdir="$TF_DIR" validate
 git -C "$ROOT" diff --check
