@@ -1,9 +1,9 @@
 # Completion
 
-- Outcome: `scripts/codex-vm.sh` is the repository's only production shell script and contains all eight focused Mac helpers plus all six VM and Terraform payloads.
-- Interaction: launching the console displays the menu before any preparation check. An unprepared protected action asks before setup in a terminal, while non-interactive commands stop with an explicit setup instruction.
-- Focused proof: PASS at `proof/runs/20260725T064439004960Z`.
-- Integration proof: PASS at `../remote-control-managed-workspace/proof/runs/20260725T064454026596Z`.
+- Outcome: complete. Codex sign-in and device pairing are separate actions, pairing requires login, and the interactive menu is grouped by function.
+- Red proof: FAIL at `proof/runs/20260725T104741081484Z` because the pre-change console omitted the required `sign-in` command.
+- Focused proof: PASS at `proof/runs/20260725T105358937004Z`; final proof review strengthened subtitle read-back to require exact ANSI-normalized menu lines.
+- Managed-workspace integration proof: PASS at `../remote-control-managed-workspace/proof/runs/20260725T105042747738Z`.
+- Dot-codex missing-login integration proof: PASS at `../dot-codex-vm-bootstrap/proof/runs/20260725T105102050661Z`.
 - Repository gate: the applicable `other` profile and Git diff checks PASS. The aggregate reports only the repository's pre-existing missing root `AGENTS.md`.
-- Fresh evaluator: PASS. It confirmed menu-first rendering, consent and cancellation, setup-failure blocking, semantic marker validation, subscription safety, non-mutating dry-run, and the broader Terraform and VM regression evidence.
-- Packaging: runtime extraction preserves the former helper boundaries in private mode-0700 temporary directories and removes them after each action. Terraform uses the private console entrypoint for local SSH-key preparation without receiving private key material.
+- Fresh evaluator: PASS. It found the behavior aligned with the user goal, the single-script/manual-Terraform architecture preserved, realistic PTY and extracted-helper coverage, no plausible central broken-pass, and only acceptable live-provider gaps.

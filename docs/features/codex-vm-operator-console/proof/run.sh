@@ -274,7 +274,7 @@ touch "$CODEX_VM_TEST_SSH_CONFIG" "$CODEX_VM_TEST_KNOWN_HOSTS"
 CONSOLE_COPY="$FAKE_ROOT/scripts/codex-vm.sh"
 HELP_OUTPUT="$FIXTURE/help.txt"
 "$CONSOLE_COPY" help >"$HELP_OUTPUT"
-for command in setup pair dot-codex shell ssh-close workspace-open workspace-close status; do
+for command in setup sign-in pair dot-codex shell ssh-close workspace-open workspace-close status; do
   rg -F "$command" "$HELP_OUTPUT" >/dev/null || fail "help omits $command"
 done
 for removed_command in deploy prepare sync-config repair recover ssh-open; do
@@ -393,6 +393,17 @@ assert_helper() {
     fail "$command did not call $helper"
 }
 
+assert_account_helper() {
+  local command="$1"
+  local mode="$2"
+  : >"$CALL_LOG"
+  "$CONSOLE_COPY" "$command" >"$FIXTURE/$command.txt"
+  [[ "$(rg -c '^helper:' "$CALL_LOG")" == "1" ]] ||
+    fail "$command made an unexpected number of helper calls"
+  rg -Fx $'helper:codex-pair.sh\t'"$mode" "$CALL_LOG" >/dev/null ||
+    fail "$command did not call codex-pair.sh with mode $mode"
+}
+
 assert_helper_sequence() {
   local label="$1"
   local expected="$2"
@@ -427,6 +438,7 @@ assert_unprepared_noninteractive() {
     fail "unprepared non-interactive $command omitted the setup instruction"
 }
 
+assert_unprepared_noninteractive sign-in
 assert_unprepared_noninteractive pair
 assert_unprepared_noninteractive dot-codex
 assert_unprepared_noninteractive workspace-open
@@ -494,11 +506,16 @@ assert_helper setup prepare-machine.sh
 if rg -F "$REJECTED_FIRST_STEP_WARNING" "$FIXTURE/setup.txt" >/dev/null; then
   fail "setup output still uses the rejected warning"
 fi
-assert_helper pair codex-pair.sh
+assert_account_helper sign-in sign-in
 rg -F 'codex_version=0.144.3' "$CALL_LOG" >/dev/null ||
   fail "preparation check omitted the current Terraform Codex version"
 rg -F 'workspace_mount=/home/azureadmin/projects' "$CALL_LOG" >/dev/null ||
   fail "preparation check omitted the current Terraform projects mount"
+assert_account_helper pair pair
+rg -F 'codex_version=0.144.3' "$CALL_LOG" >/dev/null ||
+  fail "pair preparation check omitted the current Terraform Codex version"
+rg -F 'workspace_mount=/home/azureadmin/projects' "$CALL_LOG" >/dev/null ||
+  fail "pair preparation check omitted the current Terraform projects mount"
 assert_helper dot-codex dot-codex-bootstrap.sh
 assert_helper ssh-close ssh-close.sh
 if rg -F $'az\tvm\trun-command\tinvoke' "$CALL_LOG" >/dev/null; then
@@ -628,13 +645,27 @@ rg -F 'Codex VM operator console' "$MENU_OUTPUT" >/dev/null ||
 if rg -F "$REJECTED_FIRST_STEP_WARNING" "$MENU_OUTPUT" >/dev/null; then
   fail "interactive menu still uses the rejected warning"
 fi
+python3 - "$MENU_OUTPUT" <<'PY'
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+plain = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+lines = {line.strip() for line in plain.replace("\r", "").splitlines()}
+for heading in ("Getting started", "Codex", "Configuration", "Access and status"):
+    if heading not in lines:
+        raise SystemExit(f"interactive menu omits section heading: {heading}")
+PY
 for label in \
   'Set up or repair Codex on the VM' \
-  'Sign in and pair a device' \
+  'Sign in to Codex' \
+  'Pair a device' \
   'Clone or update dot-codex from GitHub'; do
   rg -F "$label" "$MENU_OUTPUT" >/dev/null || fail "interactive menu omits: $label"
 done
 for removed_label in \
+  'Sign in and pair a device' \
   'Deploy infrastructure and prepare machine' \
   'Prepare or reconcile machine' \
   'Authenticate and pair Remote Control' \
@@ -669,7 +700,7 @@ rg -F 'Run setup now?' "$TTY_ACCEPT_OUTPUT" >/dev/null ||
   fail "interactive pair did not ask before setup"
 assert_helper_sequence \
   "interactive pair after accepted setup" \
-  "helper:prepare-machine.sh,helper:codex-pair.sh"
+  $'helper:prepare-machine.sh,helper:codex-pair.sh\tpair'
 
 rm -f "$PREPARED_STATE"
 : >"$CALL_LOG"
@@ -682,7 +713,7 @@ assert_helper_sequence \
 rm -f "$PREPARED_STATE"
 : >"$CALL_LOG"
 MENU_DECLINE_OUTPUT="$FIXTURE/menu-decline.txt"
-run_menu_session "$MENU_DECLINE_OUTPUT" 0 $'2\nn\n\n0\n'
+run_menu_session "$MENU_DECLINE_OUTPUT" 0 $'3\nn\n\n0\n'
 [[ "$(rg -c -F 'Codex VM operator console' "$MENU_DECLINE_OUTPUT")" == "2" ]] ||
   fail "menu did not return after setup was declined"
 rg -F 'Run setup now?' "$MENU_DECLINE_OUTPUT" >/dev/null ||
@@ -696,17 +727,17 @@ fi
 rm -f "$PREPARED_STATE"
 : >"$CALL_LOG"
 MENU_ACCEPT_OUTPUT="$FIXTURE/menu-accept.txt"
-run_menu_session "$MENU_ACCEPT_OUTPUT" 0 $'2\ny\n\n0\n'
+run_menu_session "$MENU_ACCEPT_OUTPUT" 0 $'3\ny\n\n0\n'
 [[ "$(rg -c -F 'Codex VM operator console' "$MENU_ACCEPT_OUTPUT")" == "2" ]] ||
   fail "menu did not return after accepted setup and pairing"
 assert_helper_sequence \
   "menu pair after accepted setup" \
-  "helper:prepare-machine.sh,helper:codex-pair.sh"
+  $'helper:prepare-machine.sh,helper:codex-pair.sh\tpair'
 
 rm -f "$PREPARED_STATE"
 : >"$CALL_LOG"
 MENU_FAILED_SETUP_OUTPUT="$FIXTURE/menu-failed-setup.txt"
-run_menu_session "$MENU_FAILED_SETUP_OUTPUT" 1 $'2\ny\n\n0\n'
+run_menu_session "$MENU_FAILED_SETUP_OUTPUT" 1 $'3\ny\n\n0\n'
 [[ "$(rg -c -F 'Codex VM operator console' "$MENU_FAILED_SETUP_OUTPUT")" == "2" ]] ||
   fail "menu did not return after accepted setup failed"
 rg -F 'Action failed.' "$MENU_FAILED_SETUP_OUTPUT" >/dev/null ||
@@ -714,5 +745,16 @@ rg -F 'Action failed.' "$MENU_FAILED_SETUP_OUTPUT" >/dev/null ||
 assert_helper_sequence \
   "menu pair after failed accepted setup" \
   "helper:prepare-machine.sh"
+
+printf 'codex_version=0.144.3\nworkspace_mount=/home/azureadmin/projects\n' \
+  >"$PREPARED_STATE"
+: >"$CALL_LOG"
+MENU_SIGN_IN_OUTPUT="$FIXTURE/menu-sign-in.txt"
+run_menu_session "$MENU_SIGN_IN_OUTPUT" 0 $'2\n\n0\n'
+[[ "$(rg -c -F 'Codex VM operator console' "$MENU_SIGN_IN_OUTPUT")" == "2" ]] ||
+  fail "menu did not return after sign-in"
+assert_helper_sequence \
+  "menu sign-in" \
+  $'helper:codex-pair.sh\tsign-in'
 
 printf 'Codex VM operator console proof passed.\n'

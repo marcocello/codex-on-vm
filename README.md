@@ -77,21 +77,33 @@ cd ../../..
 scripts/codex-vm.sh setup
 ```
 
-You can also open the interactive menu immediately and choose another workflow. Before pairing, dot-codex synchronization, SSH, or workspace access, the console checks `/var/lib/codex-on-vm/prepared` against the current Terraform Codex version and projects mount. If preparation is required in an interactive terminal, it asks whether to run `setup` first. Declining cancels the selected action. A non-interactive command stops with an instruction to run `scripts/codex-vm.sh setup`, and a failed accepted setup prevents the requested workflow from running.
+You can also open the interactive menu immediately and choose another workflow. Before sign-in, pairing, dot-codex synchronization, SSH, or workspace access, the console checks `/var/lib/codex-on-vm/prepared` against the current Terraform Codex version and projects mount. If preparation is required in an interactive terminal, it asks whether to run `setup` first. Declining cancels the selected action. A non-interactive command stops with an instruction to run `scripts/codex-vm.sh setup`, and a failed accepted setup prevents the requested workflow from running.
 
 This command waits for the Azure VM agent, extracts the inline provisioner and supporting payloads from `scripts/codex-vm.sh`, sends them through Azure Run Command, verifies their checksums on the VM, prepares and mounts the disk, installs or repairs Codex and Remote Control, reads back readiness and the SSH host key, and only then writes the local `codex-on-vm` SSH configuration. It does not open TCP/22.
 
 Rerun `setup` after replacing the VM. It reuses the attached filesystem and persistent Codex home without formatting existing state. Preview it without changing anything with `scripts/codex-vm.sh --dry-run setup`.
 
-## First authentication and device pairing
+## Codex account and device setup
 
-Launch authentication and pairing from the Mac:
+### Sign in to Codex
+
+Launch Codex authentication from the Mac:
+
+```bash
+scripts/codex-vm.sh sign-in
+```
+
+This opens temporary `/32` SSH, starts device authentication only when the managed CLI is not already signed in, and closes SSH on success or failure. It does not start or pair Remote Control.
+
+### Pair a device
+
+After sign-in succeeds, request a pairing code:
 
 ```bash
 scripts/codex-vm.sh pair
 ```
 
-The workflow opens temporary `/32` SSH, launches device authentication only when needed, starts Remote Control, prints the short-lived pairing code, and closes SSH on success or failure. Enter the code on the other device using the same ChatGPT account.
+Pairing verifies the existing login, starts Remote Control, prints the short-lived pairing code, and closes SSH on success or failure. Enter the code on the other device using the same ChatGPT account. If the login is missing, pairing stops and directs you to run `sign-in`.
 
 From then on, use the paired device through Remote Control. Reopen SSH only when you need to configure, maintain, or recover the VM, and close it again when finished.
 
@@ -103,7 +115,7 @@ scripts/codex-vm.sh dot-codex
 
 Its default VM clone is `/home/azureadmin/projects/dot-codex`, and it redirects `~/.codex` to that persistent checkout without moving active state back to the VM OS disk.
 
-The VM restarts the managed daemon after reboot and checks it every minute. If Codex or Remote Control needs repair, rerun:
+The VM restarts the managed daemon after reboot and checks it every minute. The systemd launchers preserve Codex's detached daemon after they exit, require a genuinely connected Remote Control result, and rate-limit daemon restarts during an upstream relay outage. If Codex or Remote Control needs repair, rerun:
 
 ```bash
 scripts/codex-vm.sh setup
@@ -111,13 +123,24 @@ scripts/codex-vm.sh setup
 
 The idempotent setup workflow uses Azure Run Command without opening SSH and preserves the persistent Codex home.
 
+### Remaining Remote Control hardening
+
+The current recovery path protects the managed daemon from systemd teardown and rate-limits relay-outage restarts. The next reliability work is:
+
+- serialize timer and Azure-triggered recovery through one VM-side lock, with a concurrent-recovery regression;
+- add a controlled reboot verification workflow to `scripts/codex-vm.sh`;
+- choose one explicit Codex upgrade policy: repository-pinned releases or managed auto-updates with a post-update compatibility check.
+
+Implement and activate these changes through `scripts/codex-vm.sh`. Until the concurrency lock is added, avoid launching overlapping setup or dot-codex recovery operations.
+
 ## All operator scenarios
 
 | Scenario | Command |
 | --- | --- |
 | Interactive menu | `scripts/codex-vm.sh` |
 | Set up or repair Codex after manual Terraform or a VM replacement | `scripts/codex-vm.sh setup` |
-| Sign in and pair a device | `scripts/codex-vm.sh pair` |
+| Sign in to Codex | `scripts/codex-vm.sh sign-in` |
+| Pair a device with the signed-in account | `scripts/codex-vm.sh pair` |
 | Clone or update dot-codex from GitHub | `scripts/codex-vm.sh dot-codex` |
 | Open an interactive shell with automatic SSH cleanup | `scripts/codex-vm.sh shell` |
 | Close retained temporary SSH | `scripts/codex-vm.sh ssh-close` |

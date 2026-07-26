@@ -255,7 +255,8 @@ Usage:
 
 Commands:
   setup                     Set up or repair Codex after manual Terraform apply
-  pair                      Sign in and pair a device
+  sign-in                   Sign in to Codex
+  pair                      Pair a device with the signed-in Codex account
   dot-codex                 Clone or update dot-codex from GitHub
   shell                     Open a temporary interactive SSH shell, then close access
   ssh-close                 Close temporary SSH
@@ -271,6 +272,7 @@ Options:
 
 Examples:
   scripts/codex-vm.sh setup
+  scripts/codex-vm.sh sign-in
   scripts/codex-vm.sh pair
   scripts/codex-vm.sh dot-codex
   scripts/codex-vm.sh workspace-open /home/azureadmin
@@ -299,6 +301,17 @@ delegate_prepared_no_args() {
   [[ "$ACTION_CANCELLED" == "0" ]] || return 0
   headline "$label"
   run_stage "$label" run_helper "$helper"
+}
+
+account_action() {
+  local mode="$1"
+  local label="$2"
+  shift 2
+  [[ $# -eq 0 ]] || fail "$label accepts no positional arguments"
+  ensure_vm_prepared || return $?
+  [[ "$ACTION_CANCELLED" == "0" ]] || return 0
+  headline "$label"
+  run_stage "$label" run_helper codex-pair.sh "$mode"
 }
 
 setup_machine() {
@@ -612,26 +625,33 @@ show_menu() {
   while true; do
     printf '\033c'
     headline "Codex VM operator console"
-    printf '\n  1) Set up or repair Codex on the VM\n'
-    printf '  2) Sign in and pair a device\n'
-    printf '  3) Clone or update dot-codex from GitHub\n'
-    printf '  4) Open a temporary SSH shell\n'
-    printf '  5) Close temporary SSH\n'
-    printf '  6) Mount VM files on this Mac\n'
-    printf '  7) Unmount VM files\n'
-    printf '  8) Show status\n'
+    printf '\n'
+    paint '1;33' "Getting started"
+    printf '\n  1) Set up or repair Codex on the VM\n\n'
+    paint '1;33' "Codex"
+    printf '\n  2) Sign in to Codex\n'
+    printf '  3) Pair a device\n\n'
+    paint '1;33' "Configuration"
+    printf '\n  4) Clone or update dot-codex from GitHub\n\n'
+    paint '1;33' "Access and status"
+    printf '\n  5) Open a temporary SSH shell\n'
+    printf '  6) Close temporary SSH\n'
+    printf '  7) Mount VM files on this Mac\n'
+    printf '  8) Unmount VM files\n'
+    printf '  9) Show status\n'
     printf '  0) Exit\n\n'
     printf 'Choose an action: '
     IFS= read -r choice </dev/tty || return 0
     case "$choice" in
       1) action=setup ;;
-      2) action=pair ;;
-      3) action=dot-codex ;;
-      4) action=shell ;;
-      5) action=ssh-close ;;
-      6) action=workspace-open ;;
-      7) action=workspace-close ;;
-      8) action=status ;;
+      2) action=sign-in ;;
+      3) action=pair ;;
+      4) action=dot-codex ;;
+      5) action=shell ;;
+      6) action=ssh-close ;;
+      7) action=workspace-open ;;
+      8) action=workspace-close ;;
+      9) action=status ;;
       0) return 0 ;;
       *)
         warning "Unknown selection: $choice"
@@ -663,7 +683,7 @@ dispatch() {
       print_usage
       return 0
       ;;
-    setup | pair | dot-codex | shell | ssh-close | workspace-open | workspace-close | status | menu)
+    setup | sign-in | pair | dot-codex | shell | ssh-close | workspace-open | workspace-close | status | menu)
       ;;
     *) fail "unknown command '$command_name'; run scripts/codex-vm.sh help" ;;
   esac
@@ -671,7 +691,8 @@ dispatch() {
   require_macos
   case "$command_name" in
     setup) setup_machine "$@" ;;
-    pair) delegate_prepared_no_args "Sign in and pair a device" codex-pair.sh "$@" ;;
+    sign-in) account_action sign-in "Sign in to Codex" "$@" ;;
+    pair) account_action pair "Pair a device" "$@" ;;
     dot-codex) delegate_prepared_no_args "Clone or update dot-codex from GitHub" dot-codex-bootstrap.sh "$@" ;;
     shell) temporary_shell "$@" ;;
     ssh-close) delegate_no_args "Close temporary SSH" ssh-close.sh "$@" ;;
@@ -982,7 +1003,7 @@ printf 'Machine preparation completed through Azure Run Command.\n'
 printf '  VM: %s\n' "$VM_NAME"
 printf '  Projects: %s\n' "$WORKSPACE_MOUNT_PATH"
 printf '  SSH host config: %s\n' "$SSH_HOST_CONFIG_PATH"
-printf '  Next: scripts/codex-vm.sh pair\n'
+printf '  Next: scripts/codex-vm.sh sign-in\n'
 __CODEX_VM_HELPER_END__ prepare-machine.sh
 
 __CODEX_VM_HELPER_BEGIN__ codex-pair.sh
@@ -992,9 +1013,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SSH_ALIAS="${CODEX_VM_SSH_ALIAS:-codex-on-vm}"
 SSH_OPENED=0
+ACTION="${1:-}"
 
 fail() {
-  printf 'Codex pairing failed: %s\n' "$1" >&2
+  printf 'Codex account action failed: %s\n' "$1" >&2
   exit 1
 }
 
@@ -1002,7 +1024,7 @@ cleanup() {
   local status=$?
   if [[ "$SSH_OPENED" == "1" ]]; then
     "$ROOT/scripts/ssh-close.sh" >/dev/null 2>&1 || {
-      printf 'Codex pairing cleanup warning: temporary SSH may remain open; run scripts/codex-vm.sh ssh-close\n' >&2
+      printf 'Codex account cleanup warning: temporary SSH may remain open; run scripts/codex-vm.sh ssh-close\n' >&2
     }
   fi
   exit "$status"
@@ -1011,7 +1033,11 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-[[ $# -eq 0 ]] || fail "this command accepts no positional arguments"
+[[ $# -eq 1 ]] || fail "expected one action: sign-in or pair"
+case "$ACTION" in
+  sign-in | pair) ;;
+  *) fail "unknown action '$ACTION'; expected sign-in or pair" ;;
+esac
 [[ "$(uname -s)" == "Darwin" ]] || fail "this helper is for macOS"
 [[ -n "$SSH_ALIAS" && "$SSH_ALIAS" != -* && "$SSH_ALIAS" != *[[:space:]]* ]] ||
   fail "CODEX_VM_SSH_ALIAS is invalid"
@@ -1023,15 +1049,25 @@ command -v ssh >/dev/null || fail "missing required command: ssh"
 "$ROOT/scripts/ssh-open.sh"
 SSH_OPENED=1
 
-REMOTE_AUTH='CODEX_BIN="$HOME/.codex/packages/standalone/current/codex"; test -x "$CODEX_BIN" || { printf "Managed Codex is missing; run scripts/codex-vm.sh setup locally first.\n" >&2; exit 1; }; "$CODEX_BIN" login status >/dev/null 2>&1 || exec "$CODEX_BIN" login --device-auth'
-ssh -t "$SSH_ALIAS" "$REMOTE_AUTH"
-
-REMOTE_PAIR='CODEX_BIN="$HOME/.codex/packages/standalone/current/codex"; "$CODEX_BIN" remote-control start; "$CODEX_BIN" remote-control pair'
-ssh "$SSH_ALIAS" "$REMOTE_PAIR"
+case "$ACTION" in
+  sign-in)
+    REMOTE_SIGN_IN='CODEX_BIN="$HOME/.codex/packages/standalone/current/codex"; test -x "$CODEX_BIN" || { printf "Managed Codex is missing; run scripts/codex-vm.sh setup locally first.\n" >&2; exit 1; }; "$CODEX_BIN" login status >/dev/null 2>&1 || exec "$CODEX_BIN" login --device-auth'
+    ssh -t "$SSH_ALIAS" "$REMOTE_SIGN_IN"
+    ;;
+  pair)
+    REMOTE_REQUIRE_LOGIN='CODEX_BIN="$HOME/.codex/packages/standalone/current/codex"; test -x "$CODEX_BIN" || { printf "Managed Codex is missing; run scripts/codex-vm.sh setup locally first.\n" >&2; exit 1; }; "$CODEX_BIN" login status >/dev/null 2>&1 || { printf "Codex is not logged in; run scripts/codex-vm.sh sign-in from the Mac checkout.\n" >&2; exit 1; }'
+    ssh "$SSH_ALIAS" "$REMOTE_REQUIRE_LOGIN"
+    REMOTE_PAIR='CODEX_BIN="$HOME/.codex/packages/standalone/current/codex"; "$CODEX_BIN" remote-control start; "$CODEX_BIN" remote-control pair'
+    ssh "$SSH_ALIAS" "$REMOTE_PAIR"
+    ;;
+esac
 
 "$ROOT/scripts/ssh-close.sh"
 SSH_OPENED=0
-printf 'Codex authentication and pairing were launched from this Mac; temporary SSH is closed.\n'
+case "$ACTION" in
+  sign-in) printf 'Codex sign-in was launched from this Mac; temporary SSH is closed.\n' ;;
+  pair) printf 'Codex device pairing was launched from this Mac; temporary SSH is closed.\n' ;;
+esac
 __CODEX_VM_HELPER_END__ codex-pair.sh
 
 __CODEX_VM_HELPER_BEGIN__ dot-codex-bootstrap.sh
@@ -1134,7 +1170,7 @@ CODEX_BIN="$HOME/.codex/$MANAGED_RELATIVE_PATH"
   exit 1
 }
 "$CODEX_BIN" login status >/dev/null 2>&1 || {
-  printf 'Remote bootstrap preflight failed: Codex is not logged in; run scripts/codex-vm.sh pair from the Mac checkout\n' >&2
+  printf 'Remote bootstrap preflight failed: Codex is not logged in; run scripts/codex-vm.sh sign-in from the Mac checkout\n' >&2
   exit 1
 }
 printf '  [remote] Codex login is ready.\n'
@@ -1221,7 +1257,7 @@ repair_remote_control() {
     return 1
   }
   "$bin" login status >/dev/null 2>&1 || {
-    remote_note "Codex login is missing; run scripts/codex-vm.sh pair from the Mac checkout"
+    remote_note "Codex login is missing; run scripts/codex-vm.sh sign-in from the Mac checkout"
     return 1
   }
   remote_note "Checking Remote Control for $context."
@@ -1348,7 +1384,7 @@ fi
 if [[ -x "$CODEX_LINK/$MANAGED_RELATIVE_PATH" ]]; then
   remote_note "Checking Codex login before changing the active home."
   "$CODEX_LINK/$MANAGED_RELATIVE_PATH" login status >/dev/null 2>&1 ||
-    fail "Codex is not logged in; run scripts/codex-vm.sh pair from the Mac checkout"
+    fail "Codex is not logged in; run scripts/codex-vm.sh sign-in from the Mac checkout"
   remote_note "Stopping the managed daemon before migration."
   "$CODEX_LINK/$MANAGED_RELATIVE_PATH" app-server daemon stop
   DAEMON_STOPPED=1
@@ -1799,16 +1835,77 @@ CODEX_BIN="$CODEX_HOME/packages/standalone/current/codex"
 DAEMON_DIR="$CODEX_HOME/app-server-daemon"
 APP_PID_FILE="$DAEMON_DIR/app-server.pid"
 UPDATER_PID_FILE="$DAEMON_DIR/app-server-updater.pid"
+HEALTH_STATE="${CODEX_RECOVERY_HEALTH_STATE:-$CODEX_HOME/codex-on-vm/remote-control-health.json}"
+FAILURE_THRESHOLD="${CODEX_RECOVERY_FAILURE_THRESHOLD:-5}"
+BACKOFF_BASE_SECONDS="${CODEX_RECOVERY_BACKOFF_BASE_SECONDS:-300}"
+BACKOFF_MAX_SECONDS="${CODEX_RECOVERY_BACKOFF_MAX_SECONDS:-3600}"
+STABILIZE_SECONDS="${CODEX_RECOVERY_STABILIZE_SECONDS:-2}"
 PS_BIN="${CODEX_RECOVERY_PS:-/usr/bin/ps}"
 KILL_BIN="${CODEX_RECOVERY_KILL:-/bin/kill}"
 SLEEP_BIN="${CODEX_RECOVERY_SLEEP:-/usr/bin/sleep}"
 CMP_BIN="${CODEX_RECOVERY_CMP:-/usr/bin/cmp}"
 PROC_ROOT="${CODEX_RECOVERY_PROC_ROOT:-/proc}"
 PROCESS_USER="$(id -un)"
+CONSECUTIVE_FAILURES=0
+LAST_RESTART_EPOCH=0
+RESTART_ATTEMPTS=0
+NOW_EPOCH=0
 
 fail() {
   printf 'Codex Remote Control recovery failed: %s\n' "$1" >&2
   exit 1
+}
+
+require_nonnegative_integer() {
+  local name="$1"
+  local value="$2"
+  [[ "$value" =~ ^[0-9]+$ ]] || fail "$name must be a non-negative integer"
+}
+
+load_health_state() {
+  local values
+  [[ -f "$HEALTH_STATE" ]] || return 0
+  if ! values="$(jq -er '
+    select(
+      (.consecutiveFailures | type == "number" and . >= 0 and floor == .) and
+      (.lastRestartEpoch | type == "number" and . >= 0 and floor == .) and
+      (.restartAttempts | type == "number" and . >= 0 and floor == .)
+    )
+    | [.consecutiveFailures, .lastRestartEpoch, .restartAttempts]
+    | @tsv
+  ' "$HEALTH_STATE")"; then
+    printf 'Ignoring invalid Remote Control health state at %s.\n' "$HEALTH_STATE" >&2
+    return 0
+  fi
+  IFS=$'\t' read -r CONSECUTIVE_FAILURES LAST_RESTART_EPOCH RESTART_ATTEMPTS <<<"$values"
+}
+
+write_health_state() {
+  local state_dir temporary
+  state_dir="$(dirname "$HEALTH_STATE")"
+  mkdir -p "$state_dir"
+  temporary="$(mktemp "$state_dir/.health-state.XXXXXX")"
+  if ! jq -n \
+    --argjson consecutiveFailures "$CONSECUTIVE_FAILURES" \
+    --argjson lastRestartEpoch "$LAST_RESTART_EPOCH" \
+    --argjson restartAttempts "$RESTART_ATTEMPTS" \
+    '{
+      consecutiveFailures: $consecutiveFailures,
+      lastRestartEpoch: $lastRestartEpoch,
+      restartAttempts: $restartAttempts
+    }' >"$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  chmod 0600 "$temporary"
+  mv "$temporary" "$HEALTH_STATE"
+}
+
+reset_health_state() {
+  CONSECUTIVE_FAILURES=0
+  LAST_RESTART_EPOCH=0
+  RESTART_ATTEMPTS=0
+  write_health_state
 }
 
 daemon_ready() {
@@ -1825,15 +1922,70 @@ daemon_ready() {
   [[ "$managed_codex_path" -ef "$CODEX_BIN" ]]
 }
 
-try_supported_recovery() {
-  if "$CODEX_BIN" remote-control start --json && daemon_ready; then
-    return 0
+daemon_stable() {
+  daemon_ready || return 1
+  "$SLEEP_BIN" "$STABILIZE_SECONDS"
+  daemon_ready
+}
+
+remote_control_connected() {
+  local output
+  if ! output="$("$CODEX_BIN" remote-control start --json 2>&1)"; then
+    [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+    return 1
   fi
-  if "$CODEX_BIN" app-server daemon restart && \
-    "$CODEX_BIN" remote-control start --json && daemon_ready; then
-    return 0
-  fi
-  return 1
+  printf '%s\n' "$output"
+  jq -e '
+    select(
+      .mode == "daemon" and
+      .status == "connected" and
+      .timedOut == false and
+      (.environmentId | type == "string" and length > 0) and
+      (.daemon | type == "object") and
+      (.daemon.status | type == "string" and length > 0)
+    )
+  ' <<<"$output" >/dev/null
+}
+
+finish_connected() {
+  local message="$1"
+  reset_health_state || fail "could not persist connected health state"
+  printf '%s\n' "$message"
+}
+
+record_connection_failure() {
+  CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
+  write_health_state || fail "could not persist Remote Control failure state"
+}
+
+restart_backoff_seconds() {
+  local delay attempt
+  delay="$BACKOFF_BASE_SECONDS"
+  for ((attempt = 1; attempt < RESTART_ATTEMPTS; attempt++)); do
+    if ((delay >= BACKOFF_MAX_SECONDS / 2)); then
+      delay="$BACKOFF_MAX_SECONDS"
+      break
+    fi
+    delay=$((delay * 2))
+  done
+  ((delay <= BACKOFF_MAX_SECONDS)) || delay="$BACKOFF_MAX_SECONDS"
+  printf '%s\n' "$delay"
+}
+
+restart_is_due() {
+  local delay elapsed
+  ((CONSECUTIVE_FAILURES >= FAILURE_THRESHOLD)) || return 1
+  ((LAST_RESTART_EPOCH == 0)) && return 0
+  delay="$(restart_backoff_seconds)"
+  ((NOW_EPOCH >= LAST_RESTART_EPOCH)) || return 1
+  elapsed=$((NOW_EPOCH - LAST_RESTART_EPOCH))
+  ((elapsed >= delay))
+}
+
+record_restart_attempt() {
+  LAST_RESTART_EPOCH="$NOW_EPOCH"
+  RESTART_ATTEMPTS=$((RESTART_ATTEMPTS + 1))
+  write_health_state || fail "could not persist Remote Control restart state"
 }
 
 record_value() {
@@ -1889,18 +2041,77 @@ terminate_verified_stale_parent() {
   return 1
 }
 
+recover_after_restart() {
+  if remote_control_connected && daemon_stable; then
+    finish_connected "Codex Remote Control recovered after a bounded daemon restart."
+    return 0
+  fi
+  daemon_ready && return 1
+  recover_verified_stale
+}
+
+recover_verified_stale() {
+  if terminate_verified_stale_parent && remote_control_connected && daemon_stable; then
+    finish_connected "Codex Remote Control recovered from a verified stale updater."
+    return 0
+  fi
+  return 1
+}
+
+handle_remote_degradation() {
+  local delay
+  record_connection_failure
+  if ((CONSECUTIVE_FAILURES < FAILURE_THRESHOLD)); then
+    fail "relay connection is degraded ($CONSECUTIVE_FAILURES/$FAILURE_THRESHOLD); the healthy local daemon was left running"
+  fi
+  if ! restart_is_due; then
+    delay="$(restart_backoff_seconds)"
+    fail "relay connection remains degraded; restart backoff is active for up to $delay seconds"
+  fi
+  record_restart_attempt
+  if "$CODEX_BIN" app-server daemon restart && recover_after_restart; then
+    return 0
+  fi
+  fail "bounded daemon restart did not restore a connected Remote Control session"
+}
+
 command -v jq >/dev/null || fail "jq is unavailable"
 [[ -x "$CMP_BIN" ]] || fail "cmp is unavailable at $CMP_BIN"
 [[ -x "$CODEX_BIN" ]] || fail "managed Codex install is unavailable at $CODEX_BIN"
+require_nonnegative_integer CODEX_RECOVERY_FAILURE_THRESHOLD "$FAILURE_THRESHOLD"
+require_nonnegative_integer CODEX_RECOVERY_BACKOFF_BASE_SECONDS "$BACKOFF_BASE_SECONDS"
+require_nonnegative_integer CODEX_RECOVERY_BACKOFF_MAX_SECONDS "$BACKOFF_MAX_SECONDS"
+require_nonnegative_integer CODEX_RECOVERY_STABILIZE_SECONDS "$STABILIZE_SECONDS"
+((FAILURE_THRESHOLD > 0)) || fail "CODEX_RECOVERY_FAILURE_THRESHOLD must be greater than zero"
+((BACKOFF_BASE_SECONDS > 0)) || fail "CODEX_RECOVERY_BACKOFF_BASE_SECONDS must be greater than zero"
+((BACKOFF_MAX_SECONDS >= BACKOFF_BASE_SECONDS)) ||
+  fail "CODEX_RECOVERY_BACKOFF_MAX_SECONDS must not be less than the base"
+if [[ -n "${CODEX_RECOVERY_NOW_EPOCH:-}" ]]; then
+  require_nonnegative_integer CODEX_RECOVERY_NOW_EPOCH "$CODEX_RECOVERY_NOW_EPOCH"
+  NOW_EPOCH="$CODEX_RECOVERY_NOW_EPOCH"
+else
+  NOW_EPOCH="$(date +%s)"
+fi
+umask 077
+load_health_state
 
-if try_supported_recovery; then
-  printf 'Codex Remote Control is ready.\n'
+if remote_control_connected && daemon_stable; then
+  finish_connected "Codex Remote Control is connected."
   exit 0
 fi
 
-terminate_verified_stale_parent || fail "supported lifecycle recovery failed and the stale process state was not safe to terminate"
-try_supported_recovery || fail "managed daemon did not recover after terminating the verified stale updater"
-printf 'Codex Remote Control recovered from a verified stale updater.\n'
+if daemon_ready; then
+  handle_remote_degradation
+  exit 0
+fi
+
+record_restart_attempt
+if "$CODEX_BIN" app-server daemon restart; then
+  recover_after_restart && exit 0
+else
+  recover_verified_stale && exit 0
+fi
+fail "supported lifecycle recovery failed and the stale process state was not safe to terminate"
 __CODEX_VM_HELPER_END__ ensure-codex-remote-control.sh
 
 __CODEX_VM_HELPER_BEGIN__ ensure-ssh-keys.sh
@@ -2274,10 +2485,11 @@ Description=Bootstrap the managed Codex Remote Control daemon after boot
 Wants=network-online.target
 After=network-online.target
 RequiresMountsFor=$MOUNT_PATH
-ConditionPathIsExecutable=$admin_home_logical/.codex/packages/standalone/current/codex
+ConditionFileIsExecutable=$admin_home_logical/.codex/packages/standalone/current/codex
 
 [Service]
 Type=oneshot
+KillMode=process
 User=$ADMIN_USER
 Group=$ADMIN_USER
 Environment=HOME=$admin_home_logical
@@ -2295,10 +2507,11 @@ Description=Ensure the managed Codex Remote Control daemon is ready
 Wants=network-online.target
 After=network-online.target codex-remote-control-bootstrap.service
 RequiresMountsFor=$MOUNT_PATH
-ConditionPathIsExecutable=$admin_home_logical/.codex/packages/standalone/current/codex
+ConditionFileIsExecutable=$admin_home_logical/.codex/packages/standalone/current/codex
 
 [Service]
 Type=oneshot
+KillMode=process
 User=$ADMIN_USER
 Group=$ADMIN_USER
 Environment=HOME=$admin_home_logical
@@ -2391,11 +2604,26 @@ install_codex() {
 }
 
 finish_preparation() {
-  local marker host_key_file host_key
+  local marker host_key_file host_key managed_codex attempt health_ready
   systemctl daemon-reload
   systemctl enable codex-remote-control-bootstrap.service codex-remote-control-health.timer
   systemctl enable --now fail2ban unattended-upgrades
   systemctl start codex-remote-control-health.timer
+  managed_codex="$ADMIN_CODEX_HOME/packages/standalone/current/codex"
+  if run_as_admin env HOME="$ADMIN_HOME_PHYSICAL" CODEX_HOME="$ADMIN_CODEX_HOME" \
+    "$managed_codex" login status >/dev/null 2>&1; then
+    systemctl start codex-remote-control-bootstrap.service
+    health_ready=0
+    for attempt in 1 2 3 4 5; do
+      if systemctl start codex-remote-control-health.service; then
+        health_ready=1
+        break
+      fi
+      ((attempt == 5)) || sleep 5
+    done
+    ((health_ready == 1)) ||
+      fail "Remote Control did not become connected after authenticated systemd activation"
+  fi
   install -d -m 0755 "$(root_path /run/sshd)"
   sshd -t
   if systemctl is-active --quiet ssh; then

@@ -8,7 +8,7 @@
 - A real Codex directory becomes a timestamped backup, its ignored runtime state survives in the clone, tracked repository files win, and `.codex` resolves to `dot-codex`.
 - A second run updates the clone without creating another backup or repeating the daemon migration.
 - An existing clone with tracked local edits is rejected before the daemon or `.codex` changes.
-- A managed but unauthenticated Codex home is rejected before the daemon or `.codex` changes and directs the operator to the Mac-owned `scripts/codex-vm.sh pair` workflow rather than VM-side authentication.
+- A managed but unauthenticated Codex home is rejected before the daemon or `.codex` changes and directs the operator to the Mac-owned `scripts/codex-vm.sh sign-in` workflow rather than VM-side authentication.
 - A stale prior SSH state is normalized before opening, every phase is printed in order, and Azure recovery runs before migration and after SSH closure.
 - Remote Control progresses through `connecting` with otherwise valid fields, failed starts, the VM recovery helper, `connected` with a timeout, `connected` with an empty environment ID, and finally verified `connected` state; daemon-only health and every independently invalid status, timeout, or environment response are insufficient.
 - Remote failure closes temporary SSH, and a post-move recovery failure restores the original Codex directory.
@@ -63,7 +63,7 @@
 
 - Producer/activation: the fixture provides a managed Codex executable whose real `login status` subprocess boundary reports no login, then invokes the production helper.
 - Consumer: the production helper reaches the same managed executable it would stop and migrate.
-- Read-back: the command must fail with the local `scripts/codex-vm.sh pair` instruction and no “on the VM” direction, temporary SSH must close, `.codex` must remain the original directory, no backup may exist, and neither Azure recovery, daemon stop, nor Remote Control start may run.
+- Read-back: the command must fail with the local `scripts/codex-vm.sh sign-in` instruction and no “on the VM” direction, temporary SSH must close, `.codex` must remain the original directory, no backup may exist, and neither Azure recovery, daemon stop, nor Remote Control start may run.
 - Fake: the unsafe SSH lifecycle and transport plus the managed Codex executable are deterministic subprocess fakes.
 - Catches: discovering missing credentials only after moving the Codex home or disrupting the daemon.
 
@@ -83,7 +83,7 @@ Proves:
 
 ## Repair History
 
-- 2026-07-24 evaluator correction: missing-login failures still printed a direct `codex login --device-auth` or “authenticate on the VM” instruction after deployment ownership moved to Mac-launched entrypoints. The proof now requires `scripts/codex-vm.sh pair` guidance and rejects VM-side authentication instructions.
+- 2026-07-24 evaluator correction: missing-login failures still printed a direct `codex login --device-auth` or “authenticate on the VM” instruction after deployment ownership moved to Mac-launched entrypoints. The proof required the Mac-owned account workflow and rejected VM-side authentication instructions; after sign-in and pairing became separate actions, the required guidance became `scripts/codex-vm.sh sign-in`.
 - 2026-07-23 persistence correction: the default clone must live at `~/projects/dot-codex` so the operator bootstrap cannot redirect the active `~/.codex` back to the VM OS disk after the local preparation entrypoint established a persistent home.
 - Strengthened proof decision: drive the production helper with an empty `DOT_CODEX_REMOTE_DIR`, precreate the remote `projects` mount fixture, and require both the real clone and `~/.codex` read-back to resolve under that persistent directory. Explicit override scenarios remain unchanged.
 - Red evidence: captured attempt `proof/runs/20260723T220030820730Z` runs the pre-change default, logs `Remote clone: $HOME/dot-codex`, creates the real clone in the VM-local home, and fails because the expected persistent clone was not created.

@@ -9,13 +9,14 @@
 - A public `ssh-close` command without test-helper override exercises the production temporary-runtime branch; provider read-back observes mode-0700 runtime directories and all fourteen executable bundle files before post-command read-back proves the runtime root was removed.
 - An unprepared interactive launch displays the menu before any Terraform, Azure, setup, or action call.
 - Selecting a protected menu action while unprepared explains the requirement and asks for confirmation. An affirmative answer runs setup before the action, a negative answer runs neither, and accepted setup failure blocks the action while leaving the menu available.
-- Every unprepared protected command (`pair`, `dot-codex`, `shell`, and `workspace-open`) invoked without a terminal fails with an actionable setup instruction and runs neither setup nor the requested action.
+- Every unprepared protected command (`sign-in`, `pair`, `dot-codex`, `shell`, and `workspace-open`) invoked without a terminal fails with an actionable setup instruction and runs neither setup nor the requested action.
 - An unprepared protected command invoked in a terminal asks for confirmation. An affirmative answer runs setup before the action, while a negative answer cancels without either helper.
 - A current preparation marker allows dependent workflows to continue without repeating setup, while help, status, and cleanup commands never force preparation.
 - The actual Run Command marker script is executed against current, stale, malformed, unreadable, missing, and unreachable fixture states. Only the current Terraform Codex version and projects mount skip the confirmation requirement.
 - An active Azure subscription mismatch fails before the marker check, setup, or requested action.
 - The old first-step warning is absent from help, setup output, and the menu because ordering is enforced by behavior.
-- The distinct `setup`, `pair`, and `dot-codex` subcommands dispatch to their embedded helpers with exact arguments.
+- The distinct `setup`, `sign-in`, `pair`, and `dot-codex` subcommands dispatch to their embedded helpers with exact arguments. Sign-in calls the account helper with `sign-in`; pairing calls it with `pair`.
+- The menu groups actions under `Getting started`, `Codex`, `Configuration`, and `Access and status`, exposes separate `Sign in to Codex` and `Pair a device` choices, and omits the old combined label.
 - Removed `deploy`, legacy workflow names, `ssh-open`, and `--yes` are absent from help and rejected before external calls.
 - Dry-run, invalid command, and invalid workspace input produce no external calls.
 - A failed interactive SSH client still closes temporary SSH.
@@ -37,7 +38,7 @@
 
 ## Scenario: Interactive menu
 
-- Producer/activation: Python allocates a real pseudo-terminal, launches the production console with no arguments, selects “Set up or repair Codex on the VM,” acknowledges its result, then exits.
+- Producer/activation: Python allocates a real pseudo-terminal, launches the production console with no arguments, reads the sectioned menu, selects an action, acknowledges its result, then exits.
 - Consumer: terminal detection, menu rendering, input parsing, dispatcher, and return-to-menu loop remain production code.
 - Read-back: a successful setup and an injected setup failure must each render the menu again before exit. Terminal output contains the banner, distinct menu labels, stage, completion or failure result, while each complete call log records only the preparation-helper boundary exactly once.
 - Fake: only the delegated preparation helper is replaced.
@@ -95,6 +96,8 @@ Proof runner corrections:
 - 2026-07-25: after the first green implementation run, the preparation fake was strengthened to return ready only when the production Run Command payload checks both the current Terraform Codex version and projects mount. Explicit read-back assertions retain those values in the call log, preventing a marker-existence-only implementation from passing.
 - 2026-07-25: the first evaluator of the enforced gate found that the focused runner covered only unprepared `pair` and menu paths and matched marker-script substrings without executing the script. The proof now executes the generated check against current, stale, malformed, unreadable, missing, and unreachable marker states; covers automatic setup and setup-failure blocking for every protected command and menu launch; and proves subscription mismatch stops before Run Command or setup.
 - 2026-07-25 user correction: launching the console must show the options before any setup decision. When a protected action needs preparation, the console asks before running setup; declining cancels the action, and a non-interactive command fails instead of assuming consent. The previous automatic-setup expectations were replaced with consent, cancellation, and menu-first assertions.
+- 2026-07-25 user correction: authentication and device pairing are separate operator outcomes. The strengthened proof requires distinct `sign-in` and `pair` commands, exact helper modes, a login prerequisite for pairing in the managed-workspace integration proof, and section subtitles that make setup, Codex account actions, configuration, and access/status easy to scan.
+- 2026-07-25: final proof review found that a substring search for the `Codex` subtitle could also match the console banner. The menu read-back now strips ANSI codes and requires all four subtitles as complete lines, closing that false-green path without changing behavior.
 
 ## Environment
 

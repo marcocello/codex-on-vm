@@ -429,8 +429,8 @@ if FAKE_CODEX_NOT_LOGGED_IN=1 run_helper \
   "$AUTH_REMOTE_DIR" >"$AUTH_FIXTURE/output.log" 2>&1; then
   fail "managed Codex home without credentials unexpectedly succeeded"
 fi
-grep -F 'scripts/codex-vm.sh pair' "$AUTH_FIXTURE/output.log" >/dev/null ||
-  fail "missing-auth refusal did not direct authentication to the local pairing entrypoint"
+grep -F 'scripts/codex-vm.sh sign-in' "$AUTH_FIXTURE/output.log" >/dev/null ||
+  fail "missing-auth refusal did not direct authentication to the local sign-in entrypoint"
 if grep -Fi 'on the VM' "$AUTH_FIXTURE/output.log" >/dev/null; then
   fail "missing-auth refusal still directs authentication from inside the VM"
 fi

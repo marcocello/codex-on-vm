@@ -75,7 +75,7 @@ run "remote_control_managed_workspace_plan" {
   }
 
   assert {
-    condition     = !can(regex("(?i)cloud-init|on the vm run|ssh-open|scripts/prepare-machine[.]sh|scripts/codex-pair[.]sh|scripts/codex-vm[.]sh (prepare|sync-config|repair)", output.next_steps)) && strcontains(output.next_steps, "interactive workflows ask before running setup") && strcontains(output.next_steps, "non-interactive commands stop") && strcontains(output.next_steps, "scripts/codex-vm.sh setup") && strcontains(output.next_steps, "scripts/codex-vm.sh pair") && strcontains(output.next_steps, "scripts/codex-vm.sh dot-codex")
+    condition     = !can(regex("(?i)cloud-init|on the vm run|ssh-open|scripts/prepare-machine[.]sh|scripts/codex-pair[.]sh|scripts/codex-vm[.]sh (prepare|sync-config|repair)", output.next_steps)) && strcontains(output.next_steps, "interactive workflows ask before running setup") && strcontains(output.next_steps, "non-interactive commands stop") && strcontains(output.next_steps, "scripts/codex-vm.sh setup") && strcontains(output.next_steps, "scripts/codex-vm.sh sign-in") && strcontains(output.next_steps, "scripts/codex-vm.sh pair") && strcontains(output.next_steps, "scripts/codex-vm.sh dot-codex")
     error_message = "Terraform must direct the operator through the local Codex VM console instead of VM-launched or legacy setup instructions."
   }
 

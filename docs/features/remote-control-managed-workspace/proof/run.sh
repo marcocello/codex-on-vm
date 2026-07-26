@@ -510,7 +510,10 @@ BACKUP_RELEASE_CODEX="$TMP/codex-home-backup/releases/0.145.0-x86_64-unknown-lin
 UNRELATED_CODEX="$TMP/unrelated-codex"
 FAKE_PROC_ROOT="$TMP/proc"
 DAEMON_STATE="$DAEMON_HOME/app-server-daemon"
+HEALTH_STATE="$DAEMON_HOME/codex-on-vm/remote-control-health.json"
 PARENT_TERMINATED="$TMP/parent-terminated"
+DAEMON_RESTARTED="$TMP/daemon-restarted"
+LIFETIME_PID_FILE="$TMP/detached-app-server.pid"
 PAIRING_STATE="$DAEMON_HOME/remote-control/pairing-proof"
 mkdir -p \
   "$(dirname "$RELEASE_CODEX")" \
@@ -528,13 +531,44 @@ if [[ "$*" == "remote-control start --json" ]]; then
   if [[ "$FAKE_CODEX_MODE" == "stale" || "$FAKE_CODEX_MODE" == mismatch_* ]]; then
     [[ -f "$FAKE_PARENT_TERMINATED" ]] || exit 1
   fi
-  printf '{"status":"started","remoteControlEnabled":true}\n'
+  if [[ -n "${FAKE_LIFETIME_PID_FILE:-}" && ! -f "$FAKE_LIFETIME_PID_FILE" ]]; then
+    /bin/sleep 30 >/dev/null 2>&1 &
+    printf '%s\n' "$!" >"$FAKE_LIFETIME_PID_FILE"
+  fi
+  case "$FAKE_CODEX_MODE" in
+    connecting)
+      printf '{"mode":"daemon","status":"connecting","environmentId":null,"timedOut":false,"daemon":{"status":"alreadyRunning"}}\n'
+      ;;
+    timed_out | outage)
+      printf '{"mode":"daemon","status":"connecting","environmentId":null,"timedOut":true,"daemon":{"status":"alreadyRunning"}}\n'
+      ;;
+    missing_environment)
+      printf '{"mode":"daemon","status":"connected","environmentId":null,"timedOut":false,"daemon":{"status":"alreadyRunning"}}\n'
+      ;;
+    degraded)
+      if [[ -f "$FAKE_DAEMON_RESTARTED" ]]; then
+        printf '{"mode":"daemon","status":"connected","environmentId":"env-proof","timedOut":false,"daemon":{"status":"started"}}\n'
+      else
+        printf '{"mode":"daemon","status":"connecting","environmentId":null,"timedOut":true,"daemon":{"status":"alreadyRunning"}}\n'
+      fi
+      ;;
+    *)
+      printf '{"mode":"daemon","status":"connected","environmentId":"env-proof","timedOut":false,"daemon":{"status":"alreadyRunning"}}\n'
+      ;;
+  esac
   exit 0
 fi
 if [[ "$*" == "app-server daemon restart" ]]; then
+  if [[ "$FAKE_CODEX_MODE" == "degraded" || "$FAKE_CODEX_MODE" == "outage" ]]; then
+    touch "$FAKE_DAEMON_RESTARTED"
+    exit 0
+  fi
   exit 1
 fi
 if [[ "$*" == "app-server daemon version" ]]; then
+  if [[ "$FAKE_CODEX_MODE" == "stale" || "$FAKE_CODEX_MODE" == mismatch_* ]]; then
+    [[ -f "$FAKE_PARENT_TERMINATED" ]] || exit 1
+  fi
   printf '{"status":"running","managedCodexPath":"%s","appServerVersion":"0.145.0"}\n' "$FAKE_RELEASE_CODEX"
   exit 0
 fi
@@ -561,25 +595,134 @@ printf 'proof-pairing-state\n' >"$PAIRING_STATE"
 export FAKE_MANAGED_CODEX="$MANAGED_CODEX"
 export FAKE_RELEASE_CODEX="$RELEASE_CODEX"
 export FAKE_PARENT_TERMINATED="$PARENT_TERMINATED"
+export FAKE_DAEMON_RESTARTED="$DAEMON_RESTARTED"
 export FAKE_PROCESS_USER="$(id -un)"
 export CODEX_HOME="$DAEMON_HOME"
 export CODEX_RECOVERY_PROC_ROOT="$FAKE_PROC_ROOT"
 export CODEX_RECOVERY_PS="$FAKE_BIN/ps"
 export CODEX_RECOVERY_KILL="$FAKE_BIN/kill"
 export CODEX_RECOVERY_SLEEP="$FAKE_BIN/sleep"
+export CODEX_RECOVERY_HEALTH_STATE="$HEALTH_STATE"
+export CODEX_RECOVERY_FAILURE_THRESHOLD=5
+export CODEX_RECOVERY_BACKOFF_BASE_SECONDS=300
+export CODEX_RECOVERY_BACKOFF_MAX_SECONDS=3600
+export CODEX_RECOVERY_NOW_EPOCH=1000
 
 : >"$CALL_LOG"
-FAKE_CODEX_MODE=healthy "$VM_SCRIPTS/ensure-codex-remote-control.sh"
+FAKE_LIFETIME_PID_FILE="$LIFETIME_PID_FILE" \
+  FAKE_CODEX_MODE=healthy "$VM_SCRIPTS/ensure-codex-remote-control.sh"
 rg -F 'codex remote-control start --json' "$CALL_LOG" >/dev/null
 if rg -F 'codex app-server daemon restart' "$CALL_LOG" >/dev/null || rg -F 'kill ' "$CALL_LOG" >/dev/null; then
   printf 'healthy daemon recovery must not restart or signal a process\n' >&2
   exit 1
 fi
+LIFETIME_PID="$(cat "$LIFETIME_PID_FILE")"
+kill -0 "$LIFETIME_PID" || fail "detached fake app-server did not survive its launcher"
+/bin/sleep 1
+kill -0 "$LIFETIME_PID" || fail "detached fake app-server did not remain alive after stabilization"
+kill "$LIFETIME_PID"
+wait "$LIFETIME_PID" 2>/dev/null || true
+[[ "$(jq -r '.consecutiveFailures' "$HEALTH_STATE")" == "0" ]] ||
+  fail "connected recovery did not reset the failure count"
 
 : >"$CALL_LOG"
 FAKE_CODEX_MODE=stopped "$VM_SCRIPTS/ensure-codex-remote-control.sh"
 rg -F 'codex remote-control start --json' "$CALL_LOG" >/dev/null
 rg -F 'codex app-server daemon version' "$CALL_LOG" >/dev/null
+
+for rejected_mode in connecting timed_out missing_environment; do
+  printf '{"consecutiveFailures":0,"lastRestartEpoch":0,"restartAttempts":0}\n' >"$HEALTH_STATE"
+  : >"$CALL_LOG"
+  if FAKE_CODEX_MODE="$rejected_mode" "$VM_SCRIPTS/ensure-codex-remote-control.sh"; then
+    fail "$rejected_mode Remote Control state was accepted as connected"
+  fi
+  if rg -F 'codex app-server daemon restart' "$CALL_LOG" >/dev/null ||
+    rg -F 'kill ' "$CALL_LOG" >/dev/null; then
+    fail "$rejected_mode Remote Control state restarted or signalled a healthy local daemon"
+  fi
+done
+
+printf '{"consecutiveFailures":0,"lastRestartEpoch":0,"restartAttempts":0}\n' >"$HEALTH_STATE"
+rm -f "$DAEMON_RESTARTED"
+for attempt in 1 2 3 4; do
+  : >"$CALL_LOG"
+  if FAKE_CODEX_MODE=degraded "$VM_SCRIPTS/ensure-codex-remote-control.sh"; then
+    fail "relay degradation attempt $attempt unexpectedly reported ready"
+  fi
+  if rg -F 'codex app-server daemon restart' "$CALL_LOG" >/dev/null ||
+    rg -F 'kill ' "$CALL_LOG" >/dev/null; then
+    fail "relay degradation attempt $attempt restarted or signalled the healthy local daemon"
+  fi
+done
+: >"$CALL_LOG"
+FAKE_CODEX_MODE=degraded "$VM_SCRIPTS/ensure-codex-remote-control.sh"
+[[ "$(rg -c '^codex app-server daemon restart$' "$CALL_LOG")" == "1" ]] ||
+  fail "fifth consecutive relay failure did not perform exactly one restart"
+[[ "$(jq -r '.consecutiveFailures' "$HEALTH_STATE")" == "0" ]] ||
+  fail "successful post-restart connection did not reset recovery state"
+
+printf '{"consecutiveFailures":4,"lastRestartEpoch":0,"restartAttempts":0}\n' >"$HEALTH_STATE"
+rm -f "$DAEMON_RESTARTED"
+: >"$CALL_LOG"
+if FAKE_CODEX_MODE=outage "$VM_SCRIPTS/ensure-codex-remote-control.sh"; then
+  fail "sustained relay outage unexpectedly reported ready after restart"
+fi
+[[ "$(rg -c '^codex app-server daemon restart$' "$CALL_LOG")" == "1" ]] ||
+  fail "sustained relay outage did not perform its first bounded restart"
+[[ "$(jq -r '.lastRestartEpoch' "$HEALTH_STATE")" == "1000" ]] ||
+  fail "sustained relay outage did not persist the restart timestamp"
+: >"$CALL_LOG"
+if CODEX_RECOVERY_NOW_EPOCH=1100 FAKE_CODEX_MODE=outage \
+  "$VM_SCRIPTS/ensure-codex-remote-control.sh"; then
+  fail "backoff-window relay outage unexpectedly reported ready"
+fi
+if rg -F 'codex app-server daemon restart' "$CALL_LOG" >/dev/null; then
+  fail "relay outage restarted again inside the backoff window"
+fi
+: >"$CALL_LOG"
+if CODEX_RECOVERY_NOW_EPOCH=1300 FAKE_CODEX_MODE=outage \
+  "$VM_SCRIPTS/ensure-codex-remote-control.sh"; then
+  fail "post-backoff relay outage unexpectedly reported ready"
+fi
+[[ "$(rg -c '^codex app-server daemon restart$' "$CALL_LOG")" == "1" ]] ||
+  fail "relay outage did not permit one restart after backoff elapsed"
+[[ "$(jq -r '.restartAttempts' "$HEALTH_STATE")" == "2" ]] ||
+  fail "second relay restart did not persist the next exponential-backoff attempt"
+
+: >"$CALL_LOG"
+if CODEX_RECOVERY_NOW_EPOCH=1899 FAKE_CODEX_MODE=outage \
+  "$VM_SCRIPTS/ensure-codex-remote-control.sh"; then
+  fail "second exponential-backoff window unexpectedly reported ready"
+fi
+if rg -F 'codex app-server daemon restart' "$CALL_LOG" >/dev/null; then
+  fail "relay outage restarted before the doubled 600-second backoff elapsed"
+fi
+: >"$CALL_LOG"
+if CODEX_RECOVERY_NOW_EPOCH=1900 FAKE_CODEX_MODE=outage \
+  "$VM_SCRIPTS/ensure-codex-remote-control.sh"; then
+  fail "post-doubled-backoff relay outage unexpectedly reported ready"
+fi
+[[ "$(rg -c '^codex app-server daemon restart$' "$CALL_LOG")" == "1" ]] ||
+  fail "relay outage did not permit one restart after the doubled 600-second backoff"
+
+printf '{"consecutiveFailures":4,"lastRestartEpoch":5000,"restartAttempts":5}\n' >"$HEALTH_STATE"
+: >"$CALL_LOG"
+if CODEX_RECOVERY_NOW_EPOCH=8599 FAKE_CODEX_MODE=outage \
+  "$VM_SCRIPTS/ensure-codex-remote-control.sh"; then
+  fail "maximum-backoff window unexpectedly reported ready"
+fi
+if rg -F 'codex app-server daemon restart' "$CALL_LOG" >/dev/null; then
+  fail "relay outage restarted before the capped 3600-second backoff elapsed"
+fi
+: >"$CALL_LOG"
+if CODEX_RECOVERY_NOW_EPOCH=8600 FAKE_CODEX_MODE=outage \
+  "$VM_SCRIPTS/ensure-codex-remote-control.sh"; then
+  fail "post-maximum-backoff relay outage unexpectedly reported ready"
+fi
+[[ "$(rg -c '^codex app-server daemon restart$' "$CALL_LOG")" == "1" ]] ||
+  fail "relay outage did not permit one restart after the capped 3600-second backoff"
+[[ "$(jq -r '.restartAttempts' "$HEALTH_STATE")" == "6" ]] ||
+  fail "maximum-backoff restart did not persist its attempt"
 
 : >"$CALL_LOG"
 rm -f "$PARENT_TERMINATED"
@@ -594,9 +737,10 @@ calls = open(sys.argv[1], encoding="utf-8").read().splitlines()
 starts = [index for index, call in enumerate(calls) if call == "codex remote-control start --json"]
 restart = calls.index("codex app-server daemon restart")
 signal = calls.index("kill -TERM 22420")
-ready = calls.index("codex app-server daemon version")
+ready = [index for index, call in enumerate(calls) if call == "codex app-server daemon version"]
 assert len(starts) == 2, calls
-assert starts[0] < restart < signal < starts[1] < ready, calls
+assert len(ready) == 3, calls
+assert starts[0] < ready[0] < restart < signal < starts[1] < ready[1] < ready[2], calls
 PY
 
 for mismatch in \
@@ -789,8 +933,14 @@ bash -n \
   "$VM_SCRIPTS/ensure-codex-remote-control.sh" \
   "$VM_SCRIPTS/prepare-persistent-codex-home.sh" \
   "$VM_SCRIPTS/prepare-codex-vm.sh" \
-  "$ROOT/docs/features/remote-control-managed-workspace/proof/prepare-machine-scenario.sh"
+  "$ROOT/docs/features/remote-control-managed-workspace/proof/prepare-machine-scenario.sh" \
+  "$ROOT/docs/features/remote-control-managed-workspace/proof/live-systemd-scenario.sh"
 terraform -chdir="$TF_DIR" fmt -check -recursive
 terraform -chdir="$TF_DIR" validate
 git -C "$ROOT" diff --check
+if [[ "${CODEX_VM_LIVE_SYSTEMD_PROOF:-0}" == "1" ]]; then
+  "$ROOT/docs/features/remote-control-managed-workspace/proof/live-systemd-scenario.sh"
+else
+  printf 'Live systemd boundary: not requested (final remediation evidence requires CODEX_VM_LIVE_SYSTEMD_PROOF=1).\n'
+fi
 printf 'Remote-control managed workspace proof passed.\n'

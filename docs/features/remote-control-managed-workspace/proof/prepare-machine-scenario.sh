@@ -22,6 +22,7 @@ PARTITION_STATE="$FIXTURE/partition-created"
 FILESYSTEM_STATE="$FIXTURE/filesystem-created"
 MOUNT_STATE="$FIXTURE/mounted"
 FORMAT_COUNT="$FIXTURE/format-count"
+HEALTH_START_COUNT="$FIXTURE/health-start-count"
 SSH_SERVICE_STATE="$FIXTURE/ssh-service-active"
 SSH_SOCKET_STATE="$FIXTURE/ssh-socket-active"
 PACKAGE_ROOT="$FIXTURE/package"
@@ -62,6 +63,10 @@ if [[ "$*" == "app-server daemon bootstrap --remote-control" ]]; then
 fi
 if [[ "$*" == "app-server daemon bootstrap" ]]; then
   exit 0
+fi
+if [[ "$*" == "login status" ]]; then
+  [[ -f "$CODEX_HOME/auth.json" ]]
+  exit
 fi
 exit 2
 EOF
@@ -134,6 +139,11 @@ cat >"$LOCAL_BIN/ssh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'ssh %s\n' "$*" >>"$FAKE_PREPARE_CALL_LOG"
+if [[ "${FAKE_LOGIN_MISSING:-0}" == "1" &&
+  "$*" == *"login status"* &&
+  "$*" != *"login --device-auth"* ]]; then
+  exit 12
+fi
 if [[ "${FAKE_PAIR_FAIL:-0}" == "1" && "$*" == *"remote-control pair"* ]]; then
   exit 9
 fi
@@ -323,6 +333,17 @@ cat >"$REMOTE_BIN/systemctl" <<'EOF'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >>"$FAKE_REMOTE_CALL_LOG"
 case "$*" in
+  "start codex-remote-control-health.service")
+    count=0
+    if [[ -f "$FAKE_HEALTH_START_COUNT" ]]; then
+      read -r count <"$FAKE_HEALTH_START_COUNT"
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$FAKE_HEALTH_START_COUNT"
+    if [[ "${FAKE_HEALTH_TRANSIENT_ONCE:-0}" == "1" && "$count" == "1" ]]; then
+      exit 1
+    fi
+    ;;
   "is-active --quiet ssh")
     [[ -f "$FAKE_SSH_SERVICE_STATE" ]] && exit 0
     exit 3
@@ -447,6 +468,7 @@ export FAKE_PARTITION="$PARTITION"
 export FAKE_PARTITION_STATE="$PARTITION_STATE"
 export FAKE_FILESYSTEM_STATE="$FILESYSTEM_STATE"
 export FAKE_FORMAT_COUNT="$FORMAT_COUNT"
+export FAKE_HEALTH_START_COUNT="$HEALTH_START_COUNT"
 export FAKE_SSH_SERVICE_STATE="$SSH_SERVICE_STATE"
 export FAKE_SSH_SOCKET_STATE="$SSH_SOCKET_STATE"
 export FAKE_CORRUPTION_STATE="$FIXTURE/corruption-used"
@@ -497,6 +519,17 @@ PERSISTENT_HOME="$REMOTE_ROOT/home/azureadmin/projects/.codex"
 rg -F 'RequiresMountsFor=/home/azureadmin/projects' \
   "$REMOTE_ROOT/etc/systemd/system/codex-remote-control-bootstrap.service" \
   "$REMOTE_ROOT/etc/systemd/system/codex-remote-control-health.service" >/dev/null
+for service in \
+  "$REMOTE_ROOT/etc/systemd/system/codex-remote-control-bootstrap.service" \
+  "$REMOTE_ROOT/etc/systemd/system/codex-remote-control-health.service"; do
+  [[ "$(rg -c '^KillMode=process$' "$service")" == "1" ]] ||
+    fail "$(basename "$service") does not preserve the detached managed daemon"
+  [[ "$(rg -c '^ConditionFileIsExecutable=/home/azureadmin/.codex/packages/standalone/current/codex$' "$service")" == "1" ]] ||
+    fail "$(basename "$service") does not use systemd's executable-file condition"
+  if rg -F 'ConditionPathIsExecutable=' "$service" >/dev/null; then
+    fail "$(basename "$service") uses an ignored systemd condition"
+  fi
+done
 rg -F 'systemctl is-active --quiet ssh' "$REMOTE_CALL_LOG" >/dev/null
 rg -F 'systemctl is-active --quiet ssh.socket' "$REMOTE_CALL_LOG" >/dev/null
 if rg -F 'systemctl reload ssh' "$REMOTE_CALL_LOG" >/dev/null; then
@@ -516,12 +549,18 @@ if rg -F 'network nsg rule create' "$CALL_LOG" >/dev/null || rg -F 'ssh ' "$CALL
 fi
 
 printf 'persistent-auth\n' >"$PERSISTENT_HOME/auth.json"
-"$ROOT/scripts/prepare-machine.sh"
+FAKE_HEALTH_TRANSIENT_ONCE=1 "$ROOT/scripts/prepare-machine.sh"
 [[ "$(cat "$PERSISTENT_HOME/auth.json")" == "persistent-auth" ]] ||
   fail "repeated preparation changed persistent authentication"
 [[ "$(cat "$FORMAT_COUNT")" == "1" ]] || fail "repeated preparation reformatted the managed disk"
 [[ "$(rg -c '/home/azureadmin/projects ext4' "$FSTAB")" == "1" ]] ||
   fail "repeated preparation duplicated the fstab entry"
+rg -F 'systemctl start codex-remote-control-health.service' "$REMOTE_CALL_LOG" >/dev/null ||
+  fail "authenticated repeated preparation did not activate the checked-in health service"
+rg -F 'systemctl start codex-remote-control-bootstrap.service' "$REMOTE_CALL_LOG" >/dev/null ||
+  fail "authenticated repeated preparation did not activate the checked-in bootstrap service"
+[[ "$(cat "$HEALTH_START_COUNT")" == "2" ]] ||
+  fail "authenticated preparation did not retry one transient post-bootstrap health failure"
 
 : >"$REMOTE_CALL_LOG"
 rm -f "$SSH_SOCKET_STATE" "$SSH_SERVICE_STATE"
@@ -560,19 +599,45 @@ rg -F 'systemctl reload ssh' "$REMOTE_CALL_LOG" >/dev/null ||
 "$ROOT/scripts/prepare-machine.sh"
 
 : >"$CALL_LOG"
-"$ROOT/scripts/codex-pair.sh"
+"$ROOT/scripts/codex-pair.sh" sign-in
 [[ ! -e "$RULE_STATE" && ! -e "$ACCESS_STATE" ]] ||
-  fail "successful local pairing left temporary SSH open"
+  fail "successful local sign-in left temporary SSH open"
 rg -F 'ssh -t codex-on-vm ' "$CALL_LOG" >/dev/null
 rg -F 'login --device-auth' "$CALL_LOG" >/dev/null
-rg -F 'remote-control start' "$CALL_LOG" >/dev/null
-rg -F 'remote-control pair' "$CALL_LOG" >/dev/null
+if rg -F 'remote-control start' "$CALL_LOG" >/dev/null ||
+  rg -F 'remote-control pair' "$CALL_LOG" >/dev/null; then
+  fail "sign-in also started or paired Remote Control"
+fi
 
 : >"$CALL_LOG"
-if FAKE_PAIR_FAIL=1 "$ROOT/scripts/codex-pair.sh"; then
+"$ROOT/scripts/codex-pair.sh" pair
+[[ ! -e "$RULE_STATE" && ! -e "$ACCESS_STATE" ]] ||
+  fail "successful local pairing left temporary SSH open"
+rg -F 'login status' "$CALL_LOG" >/dev/null
+rg -F 'remote-control start' "$CALL_LOG" >/dev/null
+rg -F 'remote-control pair' "$CALL_LOG" >/dev/null
+if rg -F 'login --device-auth' "$CALL_LOG" >/dev/null; then
+  fail "pairing attempted device authentication"
+fi
+
+: >"$CALL_LOG"
+if FAKE_LOGIN_MISSING=1 "$ROOT/scripts/codex-pair.sh" pair; then
+  fail "pairing without a login unexpectedly succeeded"
+fi
+[[ ! -e "$RULE_STATE" && ! -e "$ACCESS_STATE" ]] ||
+  fail "missing-login pairing left temporary SSH open"
+rg -F 'scripts/codex-vm.sh sign-in' "$CALL_LOG" >/dev/null ||
+  fail "missing-login pairing omitted the local sign-in instruction"
+if rg -F 'remote-control start' "$CALL_LOG" >/dev/null ||
+  rg -F 'remote-control pair' "$CALL_LOG" >/dev/null; then
+  fail "missing-login pairing reached Remote Control"
+fi
+
+: >"$CALL_LOG"
+if FAKE_PAIR_FAIL=1 "$ROOT/scripts/codex-pair.sh" pair; then
   fail "injected pairing failure unexpectedly succeeded"
 fi
 [[ ! -e "$RULE_STATE" && ! -e "$ACCESS_STATE" ]] ||
   fail "failed local pairing left temporary SSH open"
 
-printf 'Local preparation and pairing scenario passed.\n'
+printf 'Local preparation, sign-in, and pairing scenario passed.\n'
