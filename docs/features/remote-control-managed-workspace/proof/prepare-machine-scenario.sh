@@ -14,8 +14,6 @@ REMOTE_BIN="$FIXTURE/remote-bin"
 REMOTE_ROOT="$FIXTURE/vm-root"
 CALL_LOG="$FIXTURE/calls.log"
 REMOTE_CALL_LOG="$FIXTURE/remote-calls.log"
-RULE_STATE="$FIXTURE/rule-state"
-ACCESS_STATE="$FIXTURE/access.json"
 DATA_DISK="$FIXTURE/data-disk"
 PARTITION="$FIXTURE/data-disk-part1"
 PARTITION_STATE="$FIXTURE/partition-created"
@@ -101,18 +99,23 @@ print(json.dumps({
     "subscription_id": "00000000-0000-0000-0000-000000000000",
     "resource_group_name": "prod-codex-on-vm-rg",
     "network_security_group_name": "prod-codex-on-vm-nsg",
-    "temporary_ssh_rule_name": "AllowTemporarySsh",
-    "ssh_alias": "codex-on-vm",
     "ssh_fqdn": "codex-on-vm.example.invalid",
     "ssh_username": "azureadmin",
     "vm_name": "prod-codex-on-vm-vm",
     "workspace_disk_name": "prod-codex-on-vm-workspace-disk",
     "workspace_disk_lun": 0,
     "workspace_mount_path": "/home/azureadmin/projects",
-    "local_mount_path": "/tmp/unused",
     "mac_private_key_path": os.environ["FAKE_MAC_PRIVATE_KEY"],
     "ssh_host_config_path": os.environ["FAKE_LOCAL_SSH_CONFIG"],
     "ssh_known_hosts_path": os.environ["FAKE_LOCAL_KNOWN_HOSTS"],
+    "openvpn_rule_name": "AllowOpenVpn",
+    "openvpn_port": 1194,
+    "openvpn_network": "10.250.0.0",
+    "openvpn_netmask": "255.255.255.0",
+    "openvpn_server_address": "10.250.0.1",
+    "openvpn_ssh_alias": "codex-on-vm-vpn",
+    "openvpn_local_root_path": "/tmp/openvpn-unused",
+    "openvpn_client_profile_path": "/tmp/openvpn-unused/codex-on-vm.ovpn",
     "codex_version": "0.144.3",
     "codex_package_url": "https://example.invalid/codex-package.tgz",
     "codex_package_sha256": os.environ["FAKE_PACKAGE_SHA"],
@@ -147,6 +150,13 @@ fi
 if [[ "${FAKE_PAIR_FAIL:-0}" == "1" && "$*" == *"remote-control pair"* ]]; then
   exit 9
 fi
+if [[ "$*" == *"BatchMode=yes"* && "${FAKE_VPN_UNREACHABLE:-0}" == "1" ]]; then
+  exit 255
+fi
+[[ "$*" == *"codex-on-vm-vpn"* ]] || {
+  printf 'non-VPN SSH target: %s\n' "$*" >&2
+  exit 93
+}
 exit 0
 EOF
 
@@ -276,32 +286,9 @@ print(json.dumps({
 PY
   exit 0
 fi
-if [[ "$1 $2 $3 $4" == "network nsg rule create" ]]; then
-  touch "$FAKE_PREPARE_RULE_STATE"
-  exit 0
-fi
-if [[ "$1 $2 $3 $4" == "network nsg rule show" ]]; then
-  [[ -f "$FAKE_PREPARE_RULE_STATE" ]] || exit 3
-  query=""
-  while (($#)); do
-    if [[ "$1" == "--query" ]]; then
-      query="$2"
-      break
-    fi
-    shift
-  done
-  case "$query" in
-    sourceAddressPrefix) printf '8.8.8.8/32\n' ;;
-    destinationPortRange) printf '22\n' ;;
-    access) printf 'Allow\n' ;;
-    "") printf '{}\n' ;;
-    *) exit 2 ;;
-  esac
-  exit 0
-fi
-if [[ "$1 $2 $3 $4" == "network nsg rule delete" ]]; then
-  rm -f "$FAKE_PREPARE_RULE_STATE"
-  exit 0
+if [[ "$1 $2 $3" == "network nsg rule" ]]; then
+  printf 'public ingress mutation is forbidden: %s\n' "$*" >&2
+  exit 91
 fi
 exit 2
 EOF
@@ -461,7 +448,6 @@ chmod +x "$LOCAL_BIN"/* "$REMOTE_BIN"/*
 export PATH="$LOCAL_BIN:$REAL_PATH"
 export FAKE_PREPARE_CALL_LOG="$CALL_LOG"
 export FAKE_REMOTE_CALL_LOG="$REMOTE_CALL_LOG"
-export FAKE_PREPARE_RULE_STATE="$RULE_STATE"
 export FAKE_PREPARE_MOUNT_STATE="$MOUNT_STATE"
 export FAKE_DATA_DISK="$DATA_DISK"
 export FAKE_PARTITION="$PARTITION"
@@ -480,7 +466,6 @@ export FAKE_PACKAGE_SHA="$PACKAGE_SHA"
 export FAKE_MAC_PRIVATE_KEY="$LOCAL_PRIVATE_KEY"
 export FAKE_LOCAL_SSH_CONFIG="$LOCAL_SSH_CONFIG"
 export FAKE_LOCAL_KNOWN_HOSTS="$LOCAL_KNOWN_HOSTS"
-export CODEX_SSH_STATE_FILE="$ACCESS_STATE"
 
 : >"$CALL_LOG"
 : >"$REMOTE_CALL_LOG"
@@ -497,6 +482,7 @@ fi
 for script in \
   fetch-verified-artifact \
   install-verified-codex \
+  configure-codex-openvpn \
   prepare-persistent-codex-home \
   ensure-codex-remote-control \
   prepare-codex-vm; do
@@ -542,6 +528,14 @@ rg -F 'codex_version=0.144.3' "$REMOTE_ROOT/var/lib/codex-on-vm/prepared" >/dev/
   fail "local known-hosts file does not use VM read-back"
 rg -F 'StrictHostKeyChecking yes' "$LOCAL_SSH_CONFIG" >/dev/null
 rg -F "IdentityFile $LOCAL_PRIVATE_KEY" "$LOCAL_SSH_CONFIG" >/dev/null
+rg -F 'Host codex-on-vm-vpn' "$LOCAL_SSH_CONFIG" >/dev/null
+rg -F 'HostName 10.250.0.1' "$LOCAL_SSH_CONFIG" >/dev/null
+rg -F 'HostKeyAlias codex-on-vm.example.invalid' "$LOCAL_SSH_CONFIG" >/dev/null
+[[ "$(rg -c '^Host ' "$LOCAL_SSH_CONFIG")" == "1" ]] ||
+  fail "local SSH config contains more than the VPN alias"
+if rg -Fx 'Host codex-on-vm' "$LOCAL_SSH_CONFIG" >/dev/null; then
+  fail "local SSH config contains the public alias"
+fi
 rg -F "az vm get-instance-view --subscription 00000000-0000-0000-0000-000000000000 --resource-group prod-codex-on-vm-rg --name prod-codex-on-vm-vm " "$CALL_LOG" >/dev/null
 rg -F "az vm run-command invoke --subscription 00000000-0000-0000-0000-000000000000 --resource-group prod-codex-on-vm-rg --name prod-codex-on-vm-vm --command-id RunShellScript " "$CALL_LOG" >/dev/null
 if rg -F 'network nsg rule create' "$CALL_LOG" >/dev/null || rg -F 'ssh ' "$CALL_LOG" >/dev/null; then
@@ -600,10 +594,11 @@ rg -F 'systemctl reload ssh' "$REMOTE_CALL_LOG" >/dev/null ||
 
 : >"$CALL_LOG"
 "$ROOT/scripts/codex-pair.sh" sign-in
-[[ ! -e "$RULE_STATE" && ! -e "$ACCESS_STATE" ]] ||
-  fail "successful local sign-in left temporary SSH open"
-rg -F 'ssh -t codex-on-vm ' "$CALL_LOG" >/dev/null
+rg -F 'ssh -t codex-on-vm-vpn ' "$CALL_LOG" >/dev/null
 rg -F 'login --device-auth' "$CALL_LOG" >/dev/null
+if rg -F 'network nsg rule' "$CALL_LOG" >/dev/null; then
+  fail "sign-in mutated public ingress"
+fi
 if rg -F 'remote-control start' "$CALL_LOG" >/dev/null ||
   rg -F 'remote-control pair' "$CALL_LOG" >/dev/null; then
   fail "sign-in also started or paired Remote Control"
@@ -611,8 +606,7 @@ fi
 
 : >"$CALL_LOG"
 "$ROOT/scripts/codex-pair.sh" pair
-[[ ! -e "$RULE_STATE" && ! -e "$ACCESS_STATE" ]] ||
-  fail "successful local pairing left temporary SSH open"
+rg -F 'codex-on-vm-vpn' "$CALL_LOG" >/dev/null
 rg -F 'login status' "$CALL_LOG" >/dev/null
 rg -F 'remote-control start' "$CALL_LOG" >/dev/null
 rg -F 'remote-control pair' "$CALL_LOG" >/dev/null
@@ -624,8 +618,6 @@ fi
 if FAKE_LOGIN_MISSING=1 "$ROOT/scripts/codex-pair.sh" pair; then
   fail "pairing without a login unexpectedly succeeded"
 fi
-[[ ! -e "$RULE_STATE" && ! -e "$ACCESS_STATE" ]] ||
-  fail "missing-login pairing left temporary SSH open"
 rg -F 'scripts/codex-vm.sh sign-in' "$CALL_LOG" >/dev/null ||
   fail "missing-login pairing omitted the local sign-in instruction"
 if rg -F 'remote-control start' "$CALL_LOG" >/dev/null ||
@@ -637,7 +629,13 @@ fi
 if FAKE_PAIR_FAIL=1 "$ROOT/scripts/codex-pair.sh" pair; then
   fail "injected pairing failure unexpectedly succeeded"
 fi
-[[ ! -e "$RULE_STATE" && ! -e "$ACCESS_STATE" ]] ||
-  fail "failed local pairing left temporary SSH open"
+
+: >"$CALL_LOG"
+if FAKE_VPN_UNREACHABLE=1 "$ROOT/scripts/codex-pair.sh" pair; then
+  fail "pairing with a disconnected VPN unexpectedly succeeded"
+fi
+if rg -F 'network nsg rule' "$CALL_LOG" >/dev/null || rg -F 'remote-control start' "$CALL_LOG" >/dev/null; then
+  fail "disconnected pairing crossed a mutation edge"
+fi
 
 printf 'Local preparation, sign-in, and pairing scenario passed.\n'

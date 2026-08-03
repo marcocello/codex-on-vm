@@ -56,7 +56,7 @@ scripts/codex-vm.sh setup
 
 Terraform creates infrastructure only. Before VM creation, it calls a private `scripts/codex-vm.sh` entrypoint to create or verify the Mac Ed25519 key pair and receives only the public key. It does not prepare the guest, execute a VM Run Command, or write local SSH trust files.
 
-`setup` waits for the Azure VM agent, sends checksummed preparation payloads through Azure Run Command, mounts the managed disk, installs or repairs Codex and Remote Control, verifies readiness, reads the SSH host key, and writes the local `codex-on-vm` SSH configuration. It does not open TCP/22.
+`setup` waits for the Azure VM agent, sends checksummed preparation payloads through Azure Run Command, mounts the managed disk, installs or repairs Codex and Remote Control, verifies readiness, reads the SSH host key, and writes the local `codex-on-vm-vpn` SSH configuration. It does not open TCP/22.
 
 The command is idempotent. After a VM replacement, it reuses the attached filesystem and persistent Codex home without formatting existing state. Preview the workflow without making changes:
 
@@ -68,13 +68,13 @@ Before a dependent interactive workflow, the console checks whether the VM is pr
 
 ## Account, pairing, and dot-codex
 
-Sign in from the Mac:
+Connect the existing OpenVPN profile on the Mac before using an interactive workflow. Then sign in:
 
 ```bash
 scripts/codex-vm.sh sign-in
 ```
 
-This opens temporary `/32` SSH, starts device authentication only when the managed CLI is not already signed in, and closes SSH on success or failure. It does not pair Remote Control.
+This verifies that `codex-on-vm-vpn` is reachable and starts device authentication only when the managed CLI is not already signed in. It does not pair Remote Control.
 
 After sign-in, request a pairing code:
 
@@ -82,7 +82,7 @@ After sign-in, request a pairing code:
 scripts/codex-vm.sh pair
 ```
 
-Pairing verifies the existing login, starts Remote Control, prints a short-lived code, and closes SSH on success or failure. Enter the code on the other device using the same ChatGPT account. If login is missing, pairing directs you to `sign-in`.
+Pairing verifies the existing login, starts Remote Control, and prints a short-lived code over the VPN. Enter the code on the other device using the same ChatGPT account. If login is missing, pairing directs you to `sign-in`.
 
 Clone or safely update the tracked dot-codex configuration:
 
@@ -92,23 +92,59 @@ scripts/codex-vm.sh dot-codex
 
 The default checkout is `/home/azureadmin/projects/dot-codex`. The workflow redirects `~/.codex` to this persistent checkout without moving active state back to the OS disk.
 
+## Private OpenVPN and VS Code
+
+Terraform owns only the standing UDP/1194 NSG rule. It does not create Azure VPN Gateway, Bastion, another VM, or a paid security plan. The self-hosted OpenVPN Community server runs on the existing VM, so this adds no separate paid VPN resource; the VM and its network traffic still retain their ordinary Azure costs.
+
+The supported configuration starts with an existing Mac profile at `~/.config/codex-on-vm/openvpn/codex-on-vm.ovpn` and matching server trust on the persistent VM disk. Import the profile into an OpenVPN-compatible macOS client and connect. Initial trust bootstrap after losing both copies is intentionally not provided through public SSH.
+
+While connected, reconcile the existing trust set and OpenVPN service:
+
+```bash
+scripts/codex-vm.sh vpn-setup
+```
+
+This Mac-launched script is intentionally separate from Terraform and cloud-init. It requires the connected VPN, installs only the server bundle through `codex-on-vm-vpn`, verifies `openvpn-server@codex-vm.service`, and writes a strict single-host SSH configuration. Secrets never enter Terraform state or Azure Run Command.
+
+The profile is:
+
+```text
+~/.config/codex-on-vm/openvpn/codex-on-vm.ovpn
+```
+
+Verify the tunnel:
+
+```bash
+ssh codex-on-vm-vpn
+```
+
+In VS Code, install the Remote - SSH extension, run `Remote-SSH: Connect to Host…`, and select `codex-on-vm-vpn`. This keeps the source tree, Git, language servers, dependencies, and builds on the Linux VM, which is the preferred daily workflow.
+
+Ordinary `vpn-setup` is idempotent and repairs the VM without changing trust. To deliberately revoke the old client and replace the complete trust set, run:
+
+```bash
+scripts/codex-vm.sh vpn-setup --rotate
+```
+
+Rotation keeps one private local backup for recovery. Reimport the new profile after a successful rotation. The console does not install or control the macOS OpenVPN application and does not disconnect an active tunnel.
+
 ## Recovery
 
 The VM restarts the managed daemon after reboot and checks it every minute. The systemd launchers preserve Codex's detached daemon after the launcher exits, require a connected Remote Control result, and rate-limit restarts during an upstream relay outage.
 
-For Codex installation, Remote Control, mount, or daemon problems, rerun:
+For Codex installation, Remote Control, or daemon problems, rerun:
 
 ```bash
 scripts/codex-vm.sh setup
 ```
 
-Use temporary SSH only if setup cannot complete and direct maintenance is required:
+For direct maintenance, connect OpenVPN and then use the generated private alias:
 
 ```bash
-scripts/codex-vm.sh shell
+ssh codex-on-vm-vpn
 ```
 
-## Repositories and Mac mounts
+## Repositories and VS Code
 
 Keep persistent repositories under `/home/azureadmin/projects`:
 
@@ -119,39 +155,11 @@ git clone <repository-url>
 
 The managed disk also holds Codex configuration, authentication, sessions, skills, packages, and the managed CLI. Files stored elsewhere on the VM might not survive replacement.
 
-For occasional access to the VM filesystem from the Mac, install SSHFS:
-
-```bash
-brew install --cask sshfs-mac
-```
-
-Mount and unmount the projects directory:
-
-```bash
-scripts/codex-vm.sh workspace-open
-# Work in ~/Volumes/codex-on-vm
-scripts/codex-vm.sh workspace-close
-```
-
-Mount another absolute VM directory when needed:
-
-```bash
-scripts/codex-vm.sh workspace-open /home/azureadmin
-```
-
-Run heavy Git and build operations on the VM. Avoid writing to the same working tree from both machines at once.
+Open `/home/azureadmin/projects` through VS Code Remote-SSH using `codex-on-vm-vpn`. The editor interface stays on the Mac while file access, terminals, extensions, Git, and builds execute on the VM's native filesystem.
 
 ## Access model
 
-There is no permanent inbound SSH rule. `shell` opens access for the current Mac IP, connects, and closes it on success, failure, or interruption. `workspace-open` keeps the same restricted access for the mount lifecycle, and `workspace-close` unmounts before closing SSH.
-
-If an interrupted operation leaves access behind, remove it and verify that the port is closed:
-
-```bash
-scripts/codex-vm.sh ssh-close
-```
-
-This is operator-controlled, JIT-style access with no automatic server-side expiry. Microsoft Defender JIT remains an optional paid alternative.
+There is no inbound TCP/22 rule, temporary rule, or SSHFS fallback. `sign-in`, `pair`, `dot-codex`, and `vpn-setup` visibly fail before remote mutation when `codex-on-vm-vpn` is unreachable. The console does not connect or disconnect the Mac OpenVPN client.
 
 Never commit Terraform state, `terraform.tfvars`, `backend.hcl`, private keys, pairing codes, or credentials.
 

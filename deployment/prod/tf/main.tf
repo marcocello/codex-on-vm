@@ -73,12 +73,20 @@ locals {
     workspace_disk_size_gb     = 256
     workspace_disk_lun         = 0
     workspace_mount_path       = "/home/azureadmin/projects"
-    local_workspace_mount_path = "~/Volumes/codex-on-vm"
-    ssh_host_alias             = "codex-on-vm"
-    temporary_ssh_rule_name    = "AllowTemporarySsh"
     mac_private_key_path       = local.ssh_key_paths.mac_private
     local_ssh_host_config_path = "~/.ssh/config.d/codex-on-vm.conf"
     local_ssh_known_hosts_path = pathexpand("~/.ssh/codex-on-vm-known_hosts")
+  }
+
+  openvpn = {
+    rule_name           = "AllowOpenVpn"
+    port                = 1194
+    network             = "10.250.0.0"
+    netmask             = "255.255.255.0"
+    server_address      = "10.250.0.1"
+    connection_alias    = "codex-on-vm-vpn"
+    local_root_path     = pathexpand("~/.config/codex-on-vm/openvpn")
+    client_profile_path = pathexpand("~/.config/codex-on-vm/openvpn/codex-on-vm.ovpn")
   }
 
   ubuntu_image = {

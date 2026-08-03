@@ -5,10 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 TF_DIR="$ROOT/deployment/prod/tf"
-SSH_ALIAS="${CODEX_VM_SSH_ALIAS:-codex-on-vm}"
+VPN_SSH_ALIAS="${CODEX_VM_VPN_SSH_ALIAS:-codex-on-vm-vpn}"
+OPENVPN_PROFILE_PATH="${CODEX_VM_OPENVPN_PROFILE_PATH:-$HOME/.config/codex-on-vm/openvpn/codex-on-vm.ovpn}"
 DRY_RUN=0
 USE_COLOR=1
-SHELL_SSH_OPENED=0
 PREPARATION_CONFIRMED=0
 ACTION_CANCELLED=0
 
@@ -142,11 +142,8 @@ materialize_helpers() {
     prepare-machine.sh \
     codex-pair.sh \
     dot-codex-bootstrap.sh \
-    remote-control-recover.sh \
-    ssh-open.sh \
-    ssh-close.sh \
-    workspace-open.sh \
-    workspace-close.sh; do
+    openvpn-setup.sh \
+    remote-control-recover.sh; do
     extract_embedded_helper "$helper" "$target/scripts/$helper"
   done
 
@@ -155,6 +152,7 @@ materialize_helpers() {
     ensure-ssh-keys.sh \
     fetch-verified-artifact.sh \
     install-verified-codex.sh \
+    configure-codex-openvpn.sh \
     prepare-codex-vm.sh \
     prepare-persistent-codex-home.sh; do
     extract_embedded_helper "$helper" "$target/vm-scripts/$helper"
@@ -174,6 +172,7 @@ run_embedded_payload() {
     ensure-ssh-keys.sh) ;;
     fetch-verified-artifact.sh) ;;
     install-verified-codex.sh) ;;
+    configure-codex-openvpn.sh) ;;
     prepare-codex-vm.sh) ;;
     prepare-persistent-codex-home.sh) ;;
     *) fail "unknown embedded VM payload: $payload" ;;
@@ -198,11 +197,8 @@ run_helper() {
     prepare-machine.sh) ;;
     codex-pair.sh) ;;
     dot-codex-bootstrap.sh) ;;
+    openvpn-setup.sh) ;;
     remote-control-recover.sh) ;;
-    ssh-open.sh) ;;
-    ssh-close.sh) ;;
-    workspace-open.sh) ;;
-    workspace-close.sh) ;;
     *) fail "unknown embedded helper: $helper" ;;
   esac
 
@@ -258,11 +254,7 @@ Commands:
   sign-in                   Sign in to Codex
   pair                      Pair a device with the signed-in Codex account
   dot-codex                 Clone or update dot-codex from GitHub
-  shell                     Open a temporary interactive SSH shell, then close access
-  ssh-close                 Close temporary SSH
-  workspace-open [PATH]     Mount projects, or one absolute remote path, on this Mac
-  workspace-close           Unmount the workspace and close temporary SSH
-  status                    Read VM, SSH, trust, and workspace status
+  vpn-setup [--rotate]      Repair or intentionally rotate private OpenVPN access
   menu                      Open the interactive menu
   help                      Show this help
 
@@ -275,21 +267,38 @@ Examples:
   scripts/codex-vm.sh sign-in
   scripts/codex-vm.sh pair
   scripts/codex-vm.sh dot-codex
-  scripts/codex-vm.sh workspace-open /home/azureadmin
-  scripts/codex-vm.sh status
+  scripts/codex-vm.sh vpn-setup
 
+Connect the Mac OpenVPN client before sign-in, pairing, dot-codex, or VPN maintenance.
 If preparation is required, interactive commands ask before running setup.
 Non-interactive commands stop and instruct you to run setup explicitly.
 EOF
 }
 
-delegate_no_args() {
-  local label="$1"
-  local helper="$2"
-  shift 2
-  [[ $# -eq 0 ]] || fail "$label accepts no positional arguments"
-  headline "$label"
-  run_stage "$label" run_helper "$helper"
+check_openvpn_connection() {
+  [[ $# -eq 0 ]] || fail "OpenVPN connection check accepts no positional arguments"
+  [[ -n "$VPN_SSH_ALIAS" && "$VPN_SSH_ALIAS" != -* && "$VPN_SSH_ALIAS" != *[[:space:]]* ]] ||
+    fail "CODEX_VM_VPN_SSH_ALIAS is invalid"
+  [[ "$OPENVPN_PROFILE_PATH" == /* && "$OPENVPN_PROFILE_PATH" != *$'\n'* && "$OPENVPN_PROFILE_PATH" != *$'\r'* ]] ||
+    fail "CODEX_VM_OPENVPN_PROFILE_PATH must be an absolute path without control characters"
+
+  stage "Check OpenVPN connection"
+  printf '    SSH alias: %s\n' "$VPN_SSH_ALIAS"
+  printf '    Profile: %s\n' "$OPENVPN_PROFILE_PATH"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    success "OpenVPN connection check planned"
+    return 0
+  fi
+
+  require_commands ssh
+  if ssh -o BatchMode=yes -o ConnectTimeout=5 "$VPN_SSH_ALIAS" true >/dev/null 2>&1; then
+    success "OpenVPN is connected"
+    return 0
+  fi
+  if [[ -f "$OPENVPN_PROFILE_PATH" ]]; then
+    fail "OpenVPN is not connected. Use $OPENVPN_PROFILE_PATH; import it into the Mac OpenVPN client, connect it, and retry"
+  fi
+  fail "OpenVPN is not connected and the profile is missing at $OPENVPN_PROFILE_PATH; restore or configure the profile, import it into the Mac OpenVPN client, connect it, and retry"
 }
 
 delegate_prepared_no_args() {
@@ -299,6 +308,7 @@ delegate_prepared_no_args() {
   [[ $# -eq 0 ]] || fail "$label accepts no positional arguments"
   ensure_vm_prepared || return $?
   [[ "$ACTION_CANCELLED" == "0" ]] || return 0
+  check_openvpn_connection || return $?
   headline "$label"
   run_stage "$label" run_helper "$helper"
 }
@@ -310,6 +320,7 @@ account_action() {
   [[ $# -eq 0 ]] || fail "$label accepts no positional arguments"
   ensure_vm_prepared || return $?
   [[ "$ACTION_CANCELLED" == "0" ]] || return 0
+  check_openvpn_connection || return $?
   headline "$label"
   run_stage "$label" run_helper codex-pair.sh "$mode"
 }
@@ -321,102 +332,16 @@ setup_machine() {
   PREPARATION_CONFIRMED=1
 }
 
-workspace_open() {
-  [[ $# -le 1 ]] || fail "workspace-open accepts at most one remote path"
-  if [[ $# -eq 1 && "$1" != /* ]]; then
-    fail "workspace-open requires an absolute remote path"
+openvpn_setup() {
+  [[ $# -le 1 ]] || fail "vpn-setup accepts only the optional --rotate flag"
+  if [[ $# -eq 1 && "$1" != "--rotate" ]]; then
+    fail "vpn-setup accepts only the optional --rotate flag"
   fi
   ensure_vm_prepared || return $?
   [[ "$ACTION_CANCELLED" == "0" ]] || return 0
-  headline "Open workspace mount"
-  run_stage "Open workspace mount" run_helper workspace-open.sh "$@"
-}
-
-shell_cleanup() {
-  local status="$1"
-  local close_status=0
-  trap - EXIT
-  set +e
-  if [[ "$SHELL_SSH_OPENED" == "1" ]]; then
-    run_helper ssh-close.sh
-    close_status=$?
-    SHELL_SSH_OPENED=0
-  fi
-  if [[ "$close_status" != "0" ]]; then
-    warning "Temporary SSH cleanup failed; run scripts/codex-vm.sh ssh-close."
-  fi
-  exit "$status"
-}
-
-temporary_shell() {
-  [[ $# -eq 0 ]] || fail "shell accepts no positional arguments"
-  [[ -n "$SSH_ALIAS" && "$SSH_ALIAS" != -* && "$SSH_ALIAS" != *[[:space:]]* ]] ||
-    fail "CODEX_VM_SSH_ALIAS is invalid"
-
-  if [[ "$DRY_RUN" != "1" ]]; then
-    require_commands ssh
-  fi
-  ensure_vm_prepared || return $?
-  [[ "$ACTION_CANCELLED" == "0" ]] || return 0
-  headline "Temporary SSH shell"
-  if [[ "$DRY_RUN" == "1" ]]; then
-    run_stage "Normalize temporary SSH state" run_helper ssh-close.sh
-    run_stage "Open restricted temporary SSH" run_helper ssh-open.sh
-    run_stage "Connect to $SSH_ALIAS" run_command ssh "$SSH_ALIAS"
-    run_stage "Close temporary SSH" run_helper ssh-close.sh
-    return 0
-  fi
-
-  run_stage "Normalize temporary SSH state" run_helper ssh-close.sh
-  run_stage "Open restricted temporary SSH" run_helper ssh-open.sh
-  SHELL_SSH_OPENED=1
-  trap 'shell_cleanup $?' EXIT
-  trap 'exit 130' INT TERM
-
-  run_stage "Connect to $SSH_ALIAS" run_command ssh "$SSH_ALIAS"
-  run_stage "Close temporary SSH" run_helper ssh-close.sh
-  SHELL_SSH_OPENED=0
-  trap - EXIT INT TERM
-  success "Interactive SSH ended and temporary access is closed"
-}
-
-read_connection() {
-  local connection
-  connection="$(terraform "-chdir=$TF_DIR" output -json connection)"
-  CONNECTION="$connection" python3 - <<'PY'
-import json
-import os
-import re
-
-value = json.loads(os.environ["CONNECTION"])
-keys = (
-    "subscription_id",
-    "resource_group_name",
-    "network_security_group_name",
-    "temporary_ssh_rule_name",
-    "vm_name",
-    "ssh_alias",
-    "ssh_host_config_path",
-    "ssh_known_hosts_path",
-    "local_mount_path",
-)
-patterns = (
-    r"[0-9a-fA-F-]{36}",
-    r"[A-Za-z0-9._()/-]{1,90}",
-    r"[A-Za-z0-9._-]{1,80}",
-    r"[A-Za-z0-9._-]{1,80}",
-    r"[A-Za-z0-9-]{1,64}",
-    r"[A-Za-z0-9._-]{1,64}",
-    r"/[^\t\r\n]+",
-    r"/[^\t\r\n]+",
-    r"/[^\t\r\n]+",
-)
-fields = [str(value[key]) for key in keys]
-for key, field, pattern in zip(keys, fields, patterns):
-    if re.fullmatch(pattern, field) is None:
-        raise SystemExit(f"Terraform connection output contains an unsafe {key}")
-print("\t".join(fields))
-PY
+  check_openvpn_connection || return $?
+  headline "Repair or rotate OpenVPN"
+  run_stage "Repair or rotate OpenVPN" run_helper openvpn-setup.sh "$@"
 }
 
 read_preparation_target() {
@@ -461,12 +386,15 @@ PY
 vm_is_prepared() {
   local values subscription_id resource_group vm_name workspace_mount codex_version
   local active_subscription check_script response
+  local progress_interval progress_pid elapsed check_status
 
   require_commands terraform az python3
+  printf '    Terraform: read current VM target\n'
   values="$(read_preparation_target)" || return $?
   IFS=$'\t' read -r \
     subscription_id resource_group vm_name workspace_mount codex_version <<<"$values"
 
+  printf '    Azure: verify active subscription\n'
   active_subscription="$(az account show --query id --output tsv)" ||
     fail "could not read the active Azure subscription"
   [[ "$active_subscription" == "$subscription_id" ]] ||
@@ -490,16 +418,44 @@ print("fi")
 PY
   )"
 
-  if ! response="$(az vm run-command invoke \
+  progress_interval="${CODEX_VM_PREPARATION_PROGRESS_SECONDS:-10}"
+  case "$progress_interval" in
+    '' | *[!0-9]* | 0*) fail "CODEX_VM_PREPARATION_PROGRESS_SECONDS must be a positive integer without leading zeroes" ;;
+  esac
+
+  printf '    Azure: inspect preparation marker on %s\n' "$vm_name"
+  printf '    Azure: Run Command can take a minute; progress will remain visible here.\n'
+  python3 -u - "$progress_interval" <<'PY' &
+import sys
+import time
+
+interval = int(sys.argv[1])
+elapsed = 0
+while True:
+    time.sleep(interval)
+    elapsed += interval
+    print(f"    Azure: still checking VM preparation ({elapsed}s elapsed)", flush=True)
+PY
+  progress_pid=$!
+
+  check_status=0
+  response="$(az vm run-command invoke \
     --subscription "$subscription_id" \
     --resource-group "$resource_group" \
     --name "$vm_name" \
     --command-id RunShellScript \
     --scripts "$check_script" \
     --output json \
-    --only-show-errors)"; then
-    return 1
+    --only-show-errors)" || check_status=$?
+
+  kill "$progress_pid" >/dev/null 2>&1 || true
+  wait "$progress_pid" 2>/dev/null || true
+
+  if [[ "$check_status" != "0" ]]; then
+    warning "Azure Run Command could not inspect the preparation marker."
+    return "$check_status"
   fi
+  printf '    Azure: preparation response received\n'
 
   RESPONSE="$response" python3 - <<'PY'
 import json
@@ -532,14 +488,21 @@ ensure_vm_prepared() {
     return 0
   fi
 
+  stage "Check VM preparation"
   if [[ "$DRY_RUN" == "1" ]]; then
-    printf '    Preparation gate: setup requires confirmation when the current VM marker is missing or stale.\n'
+    printf '    Terraform: read current VM target\n'
+    printf '    Azure: verify active subscription\n'
+    printf '    Azure: inspect the preparation marker with Run Command\n'
+    printf '    Marker: /var/lib/codex-on-vm/prepared\n'
+    printf '    Setup requires confirmation when the current marker is missing or stale.\n'
     PREPARATION_CONFIRMED=1
+    success "VM preparation check planned"
     return 0
   fi
 
   if vm_is_prepared; then
     PREPARATION_CONFIRMED=1
+    success "VM preparation is current"
     return 0
   fi
 
@@ -547,8 +510,7 @@ ensure_vm_prepared() {
     fail "VM setup is required before this command; run scripts/codex-vm.sh setup first"
   fi
 
-  headline "VM setup required"
-  printf 'Codex is not set up for the current VM configuration.\n'
+  warning "Codex is not set up for the current VM configuration."
   printf 'Run setup now? [y/N] '
   if ! IFS= read -r answer </dev/tty; then
     printf '\n'
@@ -567,111 +529,31 @@ ensure_vm_prepared() {
   esac
 }
 
-status_report() {
-  local values active_subscription vm_status power_state agent_state ssh_state
-  local subscription_id resource_group nsg_name rule_name vm_name
-  local ssh_alias ssh_config known_hosts local_mount
-  [[ $# -eq 0 ]] || fail "status accepts no positional arguments"
-  require_commands terraform az python3 mount
-
-  headline "Codex VM status"
-  values="$(read_connection)"
-  IFS=$'\t' read -r \
-    subscription_id resource_group nsg_name rule_name vm_name ssh_alias \
-    ssh_config known_hosts local_mount <<<"$values"
-
-  active_subscription="$(az account show --query id --output tsv)"
-  [[ "$active_subscription" == "$subscription_id" ]] ||
-    fail "Azure CLI is using subscription $active_subscription, expected $subscription_id"
-
-  vm_status="$(az vm get-instance-view \
-    --subscription "$subscription_id" \
-    --resource-group "$resource_group" \
-    --name "$vm_name" \
-    --query "[instanceView.statuses[?starts_with(code, 'PowerState/')].displayStatus | [0], instanceView.vmAgent.statuses[0].code]" \
-    --output tsv \
-    --only-show-errors)"
-  IFS=$'\t' read -r power_state agent_state <<<"$vm_status"
-
-  ssh_state="closed"
-  if az network nsg rule show \
-    --subscription "$subscription_id" \
-    --resource-group "$resource_group" \
-    --nsg-name "$nsg_name" \
-    --name "$rule_name" \
-    --only-show-errors >/dev/null 2>&1; then
-    ssh_state="OPEN"
-  fi
-
-  printf '  %-22s %s\n' "VM" "$vm_name"
-  printf '  %-22s %s\n' "Power" "${power_state:-unknown}"
-  printf '  %-22s %s\n' "VM agent" "${agent_state:-unknown}"
-  printf '  %-22s %s\n' "Temporary SSH" "$ssh_state"
-  printf '  %-22s %s\n' "SSH alias" "$ssh_alias"
-  printf '  %-22s %s\n' "SSH config" "$([[ -f "$ssh_config" ]] && printf ready || printf missing)"
-  printf '  %-22s %s\n' "Known hosts" "$([[ -f "$known_hosts" ]] && printf ready || printf missing)"
-  if mount | grep -F " on $local_mount " >/dev/null; then
-    printf '  %-22s %s\n' "Workspace mount" "mounted at $local_mount"
-  else
-    printf '  %-22s %s\n' "Workspace mount" "not mounted ($local_mount)"
-  fi
-}
-
 show_menu() {
-  local choice action action_status
+  local choice action
   [[ $# -eq 0 ]] || fail "menu accepts no positional arguments"
   [[ -t 0 && -t 1 ]] || fail "the interactive menu requires a terminal; run help for explicit commands"
 
-  while true; do
-    printf '\033c'
-    headline "Codex VM operator console"
-    printf '\n'
-    paint '1;33' "Getting started"
-    printf '\n  1) Set up or repair Codex on the VM\n\n'
-    paint '1;33' "Codex"
-    printf '\n  2) Sign in to Codex\n'
-    printf '  3) Pair a device\n\n'
-    paint '1;33' "Configuration"
-    printf '\n  4) Clone or update dot-codex from GitHub\n\n'
-    paint '1;33' "Access and status"
-    printf '\n  5) Open a temporary SSH shell\n'
-    printf '  6) Close temporary SSH\n'
-    printf '  7) Mount VM files on this Mac\n'
-    printf '  8) Unmount VM files\n'
-    printf '  9) Show status\n'
-    printf '  0) Exit\n\n'
-    printf 'Choose an action: '
-    IFS= read -r choice </dev/tty || return 0
-    case "$choice" in
-      1) action=setup ;;
-      2) action=sign-in ;;
-      3) action=pair ;;
-      4) action=dot-codex ;;
-      5) action=shell ;;
-      6) action=ssh-close ;;
-      7) action=workspace-open ;;
-      8) action=workspace-close ;;
-      9) action=status ;;
-      0) return 0 ;;
-      *)
-        warning "Unknown selection: $choice"
-        printf 'Press Enter to continue...'
-        IFS= read -r _unused </dev/tty || return 0
-        continue
-        ;;
-    esac
+  headline "Codex VM operator console"
+  printf '\n'
+  paint '1;33' "Choose one action"
+  printf '\n  1) Set up or repair Codex on the VM\n'
+  printf '  2) Sign in to Codex\n'
+  printf '  3) Pair a device\n'
+  printf '  4) Clone or update dot-codex from GitHub\n'
+  printf '  5) Repair OpenVPN\n\n'
+  printf 'Choose an action: '
+  IFS= read -r choice </dev/tty || return 0
+  case "$choice" in
+    1) action=setup ;;
+    2) action=sign-in ;;
+    3) action=pair ;;
+    4) action=dot-codex ;;
+    5) action=vpn-setup ;;
+    *) fail "unknown menu selection '$choice'; choose 1, 2, 3, 4, or 5" ;;
+  esac
 
-    set +e
-    (set -e; dispatch "$action")
-    action_status=$?
-    set -e
-    if [[ "$action_status" != "0" ]]; then
-      paint '1;31' "Action failed."
-      printf ' Review the output above; the menu will remain available.\n'
-    fi
-    printf '\nPress Enter to continue...'
-    IFS= read -r _unused </dev/tty || return 0
-  done
+  dispatch "$action"
 }
 
 dispatch() {
@@ -683,7 +565,7 @@ dispatch() {
       print_usage
       return 0
       ;;
-    setup | sign-in | pair | dot-codex | shell | ssh-close | workspace-open | workspace-close | status | menu)
+    setup | sign-in | pair | dot-codex | vpn-setup | menu)
       ;;
     *) fail "unknown command '$command_name'; run scripts/codex-vm.sh help" ;;
   esac
@@ -694,11 +576,7 @@ dispatch() {
     sign-in) account_action sign-in "Sign in to Codex" "$@" ;;
     pair) account_action pair "Pair a device" "$@" ;;
     dot-codex) delegate_prepared_no_args "Clone or update dot-codex from GitHub" dot-codex-bootstrap.sh "$@" ;;
-    shell) temporary_shell "$@" ;;
-    ssh-close) delegate_no_args "Close temporary SSH" ssh-close.sh "$@" ;;
-    workspace-open) workspace_open "$@" ;;
-    workspace-close) delegate_no_args "Close workspace mount" workspace-close.sh "$@" ;;
-    status) status_report "$@" ;;
+    vpn-setup) openvpn_setup "$@" ;;
     menu) show_menu "$@" ;;
   esac
 }
@@ -784,6 +662,7 @@ for script in \
   fetch-verified-artifact.sh \
   install-verified-codex.sh \
   prepare-persistent-codex-home.sh \
+  configure-codex-openvpn.sh \
   ensure-codex-remote-control.sh \
   prepare-codex-vm.sh; do
   [[ -r "$VM_SCRIPT_DIR/$script" ]] || fail "missing VM preparation script: $VM_SCRIPT_DIR/$script"
@@ -794,7 +673,6 @@ IFS=$'\t' read -r \
   SUBSCRIPTION_ID \
   RESOURCE_GROUP \
   VM_NAME \
-  SSH_ALIAS \
   SSH_FQDN \
   SSH_USERNAME \
   WORKSPACE_MOUNT_PATH \
@@ -804,7 +682,12 @@ IFS=$'\t' read -r \
   CODEX_PACKAGE_SHA256 \
   MAC_PRIVATE_KEY_PATH \
   SSH_HOST_CONFIG_PATH \
-  SSH_KNOWN_HOSTS_PATH <<<"$(CONNECTION="$CONNECTION" python3 - <<'PY'
+  SSH_KNOWN_HOSTS_PATH \
+  OPENVPN_PORT \
+  OPENVPN_NETWORK \
+  OPENVPN_NETMASK \
+  OPENVPN_SERVER_ADDRESS \
+  OPENVPN_SSH_ALIAS <<<"$(CONNECTION="$CONNECTION" python3 - <<'PY'
 import json
 import os
 import re
@@ -814,7 +697,6 @@ keys = (
     "subscription_id",
     "resource_group_name",
     "vm_name",
-    "ssh_alias",
     "ssh_fqdn",
     "ssh_username",
     "workspace_mount_path",
@@ -825,13 +707,17 @@ keys = (
     "mac_private_key_path",
     "ssh_host_config_path",
     "ssh_known_hosts_path",
+    "openvpn_port",
+    "openvpn_network",
+    "openvpn_netmask",
+    "openvpn_server_address",
+    "openvpn_ssh_alias",
 )
 fields = [str(value[key]) for key in keys]
 patterns = (
     r"[0-9a-fA-F-]{36}",
     r"[A-Za-z0-9._()/-]{1,90}",
     r"[A-Za-z0-9-]{1,64}",
-    r"[A-Za-z0-9._-]{1,64}",
     r"[A-Za-z0-9.-]{1,253}",
     r"[a-z_][a-z0-9_-]{0,31}",
     r"/[^\t\r\n]+",
@@ -842,6 +728,11 @@ patterns = (
     r"/[^\t\r\n]+",
     r"/[^\t\r\n]+",
     r"/[^\t\r\n]+",
+    r"[0-9]{1,5}",
+    r"[0-9.]{7,15}",
+    r"[0-9.]{7,15}",
+    r"[0-9.]{7,15}",
+    r"[A-Za-z0-9._-]{1,64}",
 )
 for key, field, pattern in zip(keys, fields, patterns):
     if re.fullmatch(pattern, field) is None:
@@ -878,6 +769,10 @@ VM_SCRIPT_DIR="$VM_SCRIPT_DIR" \
   CODEX_VERSION="$CODEX_VERSION" \
   CODEX_PACKAGE_URL="$CODEX_PACKAGE_URL" \
   CODEX_PACKAGE_SHA256="$CODEX_PACKAGE_SHA256" \
+  OPENVPN_PORT="$OPENVPN_PORT" \
+  OPENVPN_NETWORK="$OPENVPN_NETWORK" \
+  OPENVPN_NETMASK="$OPENVPN_NETMASK" \
+  OPENVPN_SERVER_ADDRESS="$OPENVPN_SERVER_ADDRESS" \
   python3 >"$REMOTE_PAYLOAD" <<'PY'
 import base64
 import hashlib
@@ -889,6 +784,7 @@ source_dir = pathlib.Path(os.environ["VM_SCRIPT_DIR"])
 files = (
     ("fetch-verified-artifact.sh", "/usr/local/sbin/fetch-verified-artifact"),
     ("install-verified-codex.sh", "/usr/local/sbin/install-verified-codex"),
+    ("configure-codex-openvpn.sh", "/usr/local/sbin/configure-codex-openvpn"),
     ("prepare-persistent-codex-home.sh", "/usr/local/sbin/prepare-persistent-codex-home"),
     ("ensure-codex-remote-control.sh", "/usr/local/sbin/ensure-codex-remote-control"),
     ("prepare-codex-vm.sh", "/usr/local/sbin/prepare-codex-vm"),
@@ -939,6 +835,10 @@ arguments = (
     os.environ["CODEX_VERSION"],
     os.environ["CODEX_PACKAGE_URL"],
     os.environ["CODEX_PACKAGE_SHA256"],
+    os.environ["OPENVPN_PORT"],
+    os.environ["OPENVPN_NETWORK"],
+    os.environ["OPENVPN_NETMASK"],
+    os.environ["OPENVPN_SERVER_ADDRESS"],
 )
 quoted = " ".join(shlex.quote(value) for value in arguments)
 print(f'exec "$VM_ROOT/usr/local/sbin/prepare-codex-vm" {quoted}')
@@ -990,8 +890,9 @@ fi
 printf '%s %s\n' "$SSH_FQDN" "$SSH_HOST_PUBLIC_KEY" |
   write_private_file "$SSH_KNOWN_HOSTS_PATH"
 cat <<EOF | write_private_file "$SSH_HOST_CONFIG_PATH"
-Host $SSH_ALIAS
-  HostName $SSH_FQDN
+Host $OPENVPN_SSH_ALIAS
+  HostName $OPENVPN_SERVER_ADDRESS
+  HostKeyAlias $SSH_FQDN
   User $SSH_USERNAME
   IdentityFile $MAC_PRIVATE_KEY_PATH
   IdentitiesOnly yes
@@ -1003,16 +904,14 @@ printf 'Machine preparation completed through Azure Run Command.\n'
 printf '  VM: %s\n' "$VM_NAME"
 printf '  Projects: %s\n' "$WORKSPACE_MOUNT_PATH"
 printf '  SSH host config: %s\n' "$SSH_HOST_CONFIG_PATH"
-printf '  Next: scripts/codex-vm.sh sign-in\n'
+printf '  Next: connect OpenVPN, then run scripts/codex-vm.sh sign-in\n'
 __CODEX_VM_HELPER_END__ prepare-machine.sh
 
 __CODEX_VM_HELPER_BEGIN__ codex-pair.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SSH_ALIAS="${CODEX_VM_SSH_ALIAS:-codex-on-vm}"
-SSH_OPENED=0
+SSH_ALIAS="${CODEX_VM_VPN_SSH_ALIAS:-codex-on-vm-vpn}"
 ACTION="${1:-}"
 
 fail() {
@@ -1020,17 +919,6 @@ fail() {
   exit 1
 }
 
-cleanup() {
-  local status=$?
-  if [[ "$SSH_OPENED" == "1" ]]; then
-    "$ROOT/scripts/ssh-close.sh" >/dev/null 2>&1 || {
-      printf 'Codex account cleanup warning: temporary SSH may remain open; run scripts/codex-vm.sh ssh-close\n' >&2
-    }
-  fi
-  exit "$status"
-}
-
-trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 [[ $# -eq 1 ]] || fail "expected one action: sign-in or pair"
@@ -1040,14 +928,10 @@ case "$ACTION" in
 esac
 [[ "$(uname -s)" == "Darwin" ]] || fail "this helper is for macOS"
 [[ -n "$SSH_ALIAS" && "$SSH_ALIAS" != -* && "$SSH_ALIAS" != *[[:space:]]* ]] ||
-  fail "CODEX_VM_SSH_ALIAS is invalid"
+  fail "CODEX_VM_VPN_SSH_ALIAS is invalid"
 command -v ssh >/dev/null || fail "missing required command: ssh"
-[[ -x "$ROOT/scripts/ssh-open.sh" && -x "$ROOT/scripts/ssh-close.sh" ]] ||
-  fail "temporary SSH helpers are unavailable"
-
-"$ROOT/scripts/ssh-close.sh"
-"$ROOT/scripts/ssh-open.sh"
-SSH_OPENED=1
+ssh -o BatchMode=yes -o ConnectTimeout=5 "$SSH_ALIAS" true >/dev/null 2>&1 ||
+  fail "OpenVPN is not connected; connect the Mac OpenVPN client and retry"
 
 case "$ACTION" in
   sign-in)
@@ -1062,11 +946,9 @@ case "$ACTION" in
     ;;
 esac
 
-"$ROOT/scripts/ssh-close.sh"
-SSH_OPENED=0
 case "$ACTION" in
-  sign-in) printf 'Codex sign-in was launched from this Mac; temporary SSH is closed.\n' ;;
-  pair) printf 'Codex device pairing was launched from this Mac; temporary SSH is closed.\n' ;;
+  sign-in) printf 'Codex sign-in was launched from this Mac over OpenVPN.\n' ;;
+  pair) printf 'Codex device pairing was launched from this Mac over OpenVPN.\n' ;;
 esac
 __CODEX_VM_HELPER_END__ codex-pair.sh
 
@@ -1075,12 +957,11 @@ __CODEX_VM_HELPER_BEGIN__ dot-codex-bootstrap.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SSH_ALIAS="${CODEX_VM_SSH_ALIAS:-codex-on-vm}"
+SSH_ALIAS="${CODEX_VM_VPN_SSH_ALIAS:-codex-on-vm-vpn}"
 REPOSITORY_URL="${DOT_CODEX_REPOSITORY_URL:-https://github.com/marcocello/dot-codex}"
 REMOTE_DIR="${DOT_CODEX_REMOTE_DIR:-}"
 REMOTE_RECOVERY_HELPER="${DOT_CODEX_REMOTE_RECOVERY_HELPER:-/usr/local/sbin/ensure-codex-remote-control}"
 REMOTE_CONTROL_RETRY_SECONDS="${DOT_CODEX_REMOTE_CONTROL_RETRY_SECONDS:-2}"
-SSH_OPENED=0
 STEP_NUMBER=0
 CURRENT_PHASE="initialization"
 
@@ -1092,7 +973,7 @@ fail() {
 step() {
   STEP_NUMBER=$((STEP_NUMBER + 1))
   CURRENT_PHASE="$1"
-  printf '\n[%d/8] %s\n' "$STEP_NUMBER" "$CURRENT_PHASE"
+  printf '\n[%d/6] %s\n' "$STEP_NUMBER" "$CURRENT_PHASE"
 }
 
 note() {
@@ -1101,19 +982,7 @@ note() {
 
 cleanup_on_exit() {
   local status=$?
-  local close_status=0
   trap - EXIT
-  set +e
-  if [[ "$SSH_OPENED" == "1" ]]; then
-    printf '\n[cleanup] Closing temporary SSH after failure or interruption.\n'
-    "$ROOT/scripts/ssh-close.sh"
-    close_status=$?
-  fi
-  if [[ "$status" == "0" && "$close_status" != "0" ]]; then
-    status=$close_status
-  elif [[ "$status" != "0" && "$close_status" != "0" ]]; then
-    printf 'Dot Codex bootstrap cleanup warning: temporary SSH could not be closed; run scripts/codex-vm.sh ssh-close\n' >&2
-  fi
   if [[ "$status" != "0" ]]; then
     printf '\n[FAILED] %s\n' "$CURRENT_PHASE" >&2
   fi
@@ -1128,7 +997,7 @@ step "Validate local inputs and helper availability"
 [[ "$(uname -s)" == "Darwin" ]] || fail "this helper is for macOS"
 [[ -n "$REPOSITORY_URL" ]] || fail "DOT_CODEX_REPOSITORY_URL must not be empty"
 [[ "$REPOSITORY_URL" != *$'\n'* && "$REPOSITORY_URL" != *$'\r'* && "$REPOSITORY_URL" != *$'\t'* ]] || fail "repository URL must not contain control characters"
-[[ -n "$SSH_ALIAS" && "$SSH_ALIAS" != -* ]] || fail "CODEX_VM_SSH_ALIAS is invalid"
+[[ -n "$SSH_ALIAS" && "$SSH_ALIAS" != -* ]] || fail "CODEX_VM_VPN_SSH_ALIAS is invalid"
 [[ "$SSH_ALIAS" != *$'\n'* && "$SSH_ALIAS" != *$'\r'* && "$SSH_ALIAS" != *$'\t'* && "$SSH_ALIAS" != *' '* ]] || fail "SSH alias must not contain whitespace"
 [[ "$REMOTE_RECOVERY_HELPER" == /* ]] || fail "DOT_CODEX_REMOTE_RECOVERY_HELPER must be an absolute remote path"
 [[ "$REMOTE_RECOVERY_HELPER" != *$'\n'* && "$REMOTE_RECOVERY_HELPER" != *$'\r'* && "$REMOTE_RECOVERY_HELPER" != *$'\t'* ]] || fail "remote recovery-helper path must not contain control characters"
@@ -1140,23 +1009,16 @@ if [[ -n "$REMOTE_DIR" ]]; then
 fi
 
 command -v ssh >/dev/null || fail "missing required command: ssh"
-[[ -x "$ROOT/scripts/ssh-open.sh" ]] || fail "missing SSH open helper"
-[[ -x "$ROOT/scripts/ssh-close.sh" ]] || fail "missing SSH close helper"
 [[ -x "$ROOT/scripts/remote-control-recover.sh" ]] || fail "missing Remote Control recovery helper"
 note "Repository: $REPOSITORY_URL"
 note "VM SSH alias: $SSH_ALIAS"
 note "Remote clone: ${REMOTE_DIR:-\$HOME/projects/dot-codex}"
 note "Local validation passed."
 
-step "Normalize temporary SSH state"
-note "Closing any retained state or deterministic provider rule before opening a fresh session."
-"$ROOT/scripts/ssh-close.sh"
-note "Temporary SSH state is clean."
-
-step "Open restricted temporary SSH"
-"$ROOT/scripts/ssh-open.sh"
-SSH_OPENED=1
-note "Restricted SSH is open for this operation."
+step "Verify OpenVPN SSH access"
+ssh -o BatchMode=yes -o ConnectTimeout=5 "$SSH_ALIAS" true >/dev/null 2>&1 ||
+  fail "OpenVPN is not connected; connect the Mac OpenVPN client and retry"
+note "The VM is reachable through OpenVPN."
 
 step "Reconcile and repair current Remote Control"
 note "Checking Codex login before any daemon recovery."
@@ -1425,12 +1287,7 @@ fi
 ls -ld "$CODEX_LINK"
 REMOTE_SCRIPT
 
-step "Close temporary SSH"
-"$ROOT/scripts/ssh-close.sh"
-SSH_OPENED=0
-note "Temporary SSH is closed."
-
-step "Verify Remote Control after SSH closure"
+step "Verify Remote Control"
 "$ROOT/scripts/remote-control-recover.sh" ||
   fail "final Remote Control verification failed; run scripts/codex-vm.sh setup after checking VM login and network access"
 printf 'Remote Control verified connected.\n'
@@ -1439,9 +1296,374 @@ step "Complete"
 printf 'Dot Codex bootstrap and repair completed successfully.\n'
 printf '  Clone: %s\n' "${REMOTE_DIR:-\$HOME/projects/dot-codex}"
 printf '  Symlink: \$HOME/.codex -> %s\n' "${REMOTE_DIR:-\$HOME/projects/dot-codex}"
-printf '  SSH: closed\n'
+printf '  SSH: VPN-only\n'
 printf '  Remote Control: connected\n'
 __CODEX_VM_HELPER_END__ dot-codex-bootstrap.sh
+
+__CODEX_VM_HELPER_BEGIN__ openvpn-setup.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TF_DIR="$ROOT/deployment/prod/tf"
+VM_CONFIGURATOR="$ROOT/vm-scripts/configure-codex-openvpn.sh"
+ROTATE=0
+LOCAL_PROMOTED=0
+LOCAL_WAS_PRESENT=0
+REMOTE_COMMITTED=0
+REMOTE_STAGE=""
+LOCAL_BACKUP=""
+OLD_CA_FINGERPRINT=""
+NEW_CA_FINGERPRINT=""
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/codex-openvpn.XXXXXX")"
+
+fail() {
+  printf 'OpenVPN setup failed: %s\n' "$1" >&2
+  exit 1
+}
+
+cleanup() {
+  local status=$?
+  local inspect_command remote_ca_fingerprint restore_local=0
+  trap - EXIT
+  set +e
+  if [[ "$status" != "0" && "$LOCAL_PROMOTED" == "1" && "$REMOTE_COMMITTED" != "1" ]]; then
+    remote_ca_fingerprint=""
+    printf -v inspect_command 'remote_ca=%q; if [[ -n "${CODEX_VM_ROOT:-}" ]]; then remote_ca="${CODEX_VM_ROOT}${remote_ca}"; fi; if sudo test -f "$remote_ca"; then sudo openssl x509 -in "$remote_ca" -noout -fingerprint -sha256; else printf "MISSING\\n"; fi' \
+      "$WORKSPACE_MOUNT/.codex-on-vm/openvpn/server/ca.crt"
+    remote_ca_fingerprint="$(ssh "$VPN_SSH_ALIAS" "$inspect_command" 2>/dev/null || true)"
+    if [[ -n "$NEW_CA_FINGERPRINT" && "$remote_ca_fingerprint" == "$NEW_CA_FINGERPRINT" ]]; then
+      REMOTE_COMMITTED=1
+      printf 'OpenVPN setup recovery: the replacement is active remotely; keeping the matching local credentials.\n' >&2
+    elif [[ -n "$OLD_CA_FINGERPRINT" && "$remote_ca_fingerprint" == "$OLD_CA_FINGERPRINT" ]]; then
+      restore_local=1
+    elif [[ -z "$OLD_CA_FINGERPRINT" && "$remote_ca_fingerprint" == "MISSING" ]]; then
+      restore_local=1
+    else
+      printf 'OpenVPN setup recovery warning: remote trust could not be identified; keeping the new local credentials and any prior backup for a safe retry.\n' >&2
+    fi
+  fi
+  if [[ -n "$REMOTE_STAGE" ]]; then
+    printf -v cleanup_command 'rm -rf -- %q' "$REMOTE_STAGE"
+    ssh "$VPN_SSH_ALIAS" "$cleanup_command" >/dev/null 2>&1 || true
+  fi
+  if [[ "$restore_local" == "1" ]]; then
+    rm -rf -- "$LOCAL_ROOT"
+    if [[ "$LOCAL_WAS_PRESENT" == "1" && -n "$LOCAL_BACKUP" && -d "$LOCAL_BACKUP" ]]; then
+      mv "$LOCAL_BACKUP" "$LOCAL_ROOT" || true
+      LOCAL_BACKUP=""
+    fi
+  fi
+  rm -rf -- "$TMP"
+  exit "$status"
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+[[ $# -le 1 ]] || fail "expected only the optional --rotate flag"
+if [[ $# -eq 1 ]]; then
+  [[ "$1" == "--rotate" ]] || fail "unknown option '$1'; expected --rotate"
+  ROTATE=1
+fi
+[[ "$(uname -s)" == "Darwin" ]] || fail "this helper is for macOS"
+for command in cmp install openssl python3 scp ssh tar terraform; do
+  command -v "$command" >/dev/null || fail "missing required command: $command"
+done
+[[ -r "$VM_CONFIGURATOR" ]] || fail "OpenVPN VM configurator is unavailable"
+
+CONNECTION="$(terraform -chdir="$TF_DIR" output -json connection)"
+IFS=$'\t' read -r \
+  SSH_FQDN SSH_USERNAME WORKSPACE_MOUNT \
+  MAC_PRIVATE_KEY SSH_CONFIG KNOWN_HOSTS \
+  VPN_PORT VPN_NETWORK VPN_NETMASK VPN_SERVER_ADDRESS VPN_SSH_ALIAS \
+  LOCAL_ROOT CLIENT_PROFILE <<<"$(CONNECTION="$CONNECTION" python3 - <<'PY'
+import json
+import os
+import re
+
+value = json.loads(os.environ["CONNECTION"])
+keys = (
+    "ssh_fqdn",
+    "ssh_username",
+    "workspace_mount_path",
+    "mac_private_key_path",
+    "ssh_host_config_path",
+    "ssh_known_hosts_path",
+    "openvpn_port",
+    "openvpn_network",
+    "openvpn_netmask",
+    "openvpn_server_address",
+    "openvpn_ssh_alias",
+    "openvpn_local_root_path",
+    "openvpn_client_profile_path",
+)
+patterns = (
+    r"[A-Za-z0-9.-]{1,253}",
+    r"[a-z_][a-z0-9_-]{0,31}",
+    r"/[^\t\r\n]+",
+    r"/[^\t\r\n]+",
+    r"/[^\t\r\n]+",
+    r"/[^\t\r\n]+",
+    r"[0-9]{1,5}",
+    r"[0-9.]{7,15}",
+    r"[0-9.]{7,15}",
+    r"[0-9.]{7,15}",
+    r"[A-Za-z0-9._-]{1,64}",
+    r"/[^\t\r\n]+",
+    r"/[^\t\r\n]+",
+)
+fields = [str(value[key]) for key in keys]
+for key, field, pattern in zip(keys, fields, patterns):
+    if re.fullmatch(pattern, field) is None:
+        raise SystemExit(f"Terraform connection output contains an unsafe {key}")
+if not fields[-1].startswith(fields[-2] + "/"):
+    raise SystemExit("OpenVPN client profile must be inside the local OpenVPN root")
+print("\t".join(fields))
+PY
+)"
+
+[[ "$VPN_PORT" -ge 1 && "$VPN_PORT" -le 65535 ]] || fail "OpenVPN port is invalid"
+[[ -f "$KNOWN_HOSTS" ]] || fail "SSH host trust is missing; run scripts/codex-vm.sh setup"
+[[ -f "$MAC_PRIVATE_KEY" ]] || fail "Mac SSH private key is missing; run scripts/codex-vm.sh setup"
+ssh -o BatchMode=yes -o ConnectTimeout=5 "$VPN_SSH_ALIAS" true >/dev/null 2>&1 ||
+  fail "OpenVPN is not connected; connect the Mac OpenVPN client and retry"
+
+required_files="ca.crt ca.key server.crt server.key client.crt client.key tls-crypt.key server.conf codex-on-vm.ovpn"
+local_complete=1
+if [[ -d "$LOCAL_ROOT" ]]; then
+  LOCAL_WAS_PRESENT=1
+  for required in $required_files; do
+    if [[ ! -f "$LOCAL_ROOT/$required" ]]; then
+      local_complete=0
+    fi
+  done
+  [[ "$local_complete" == "1" ]] || fail "local OpenVPN state is partial; restore or remove it explicitly before retrying"
+  OLD_CA_FINGERPRINT="$(openssl x509 -in "$LOCAL_ROOT/ca.crt" -noout -fingerprint -sha256)" ||
+    fail "local OpenVPN CA certificate is invalid"
+elif [[ -e "$LOCAL_ROOT" || -L "$LOCAL_ROOT" ]]; then
+  fail "local OpenVPN root is not a directory: $LOCAL_ROOT"
+else
+  local_complete=0
+fi
+
+if [[ "$local_complete" != "1" && "$ROTATE" != "1" ]]; then
+  fail "existing OpenVPN trust is missing at $LOCAL_ROOT; restore it or run scripts/codex-vm.sh vpn-setup --rotate to intentionally create replacement trust"
+fi
+
+validate_local_credentials() {
+  local target="$1"
+  local name key_pub cert_pub
+  openssl verify -purpose sslserver -CAfile "$target/ca.crt" "$target/server.crt" >/dev/null ||
+    fail "server certificate verification failed"
+  openssl verify -purpose sslclient -CAfile "$target/ca.crt" "$target/client.crt" >/dev/null ||
+    fail "client certificate verification failed"
+  for name in ca server client; do
+    key_pub="$TMP/$name-key.pub"
+    cert_pub="$TMP/$name-cert.pub"
+    openssl pkey -in "$target/$name.key" -pubout -out "$key_pub" >/dev/null 2>&1 ||
+      fail "$name private key is invalid"
+    openssl x509 -in "$target/$name.crt" -pubkey -noout >"$cert_pub" ||
+      fail "$name certificate is invalid"
+    cmp -s "$key_pub" "$cert_pub" || fail "$name certificate does not match its private key"
+  done
+  python3 - "$target" <<'PY'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+profile = (root / "codex-on-vm.ovpn").read_text(encoding="utf-8")
+for tag, name in (("ca", "ca.crt"), ("cert", "client.crt"), ("key", "client.key"), ("tls-crypt", "tls-crypt.key")):
+    match = re.search(rf"<{re.escape(tag)}>\n(.*?)</{re.escape(tag)}>", profile, re.DOTALL)
+    if match is None or match.group(1).strip() != (root / name).read_text(encoding="utf-8").strip():
+        raise SystemExit(f"client profile has mismatched inline {tag} material")
+PY
+}
+
+generate_credentials() {
+  local target="$1"
+  install -d -m 0700 "$target"
+  openssl genrsa -out "$target/ca.key" 3072 >/dev/null 2>&1
+  openssl req -x509 -new -sha256 -days 3650 \
+    -key "$target/ca.key" \
+    -out "$target/ca.crt" \
+    -subj '/CN=codex-on-vm-openvpn-ca' >/dev/null 2>&1
+
+  openssl genrsa -out "$target/server.key" 3072 >/dev/null 2>&1
+  openssl req -new -sha256 \
+    -key "$target/server.key" \
+    -out "$TMP/server.csr" \
+    -subj '/CN=codex-on-vm-server' >/dev/null 2>&1
+  cat >"$TMP/server.ext" <<EOF
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=DNS:$SSH_FQDN
+EOF
+  openssl x509 -req -sha256 -days 825 \
+    -in "$TMP/server.csr" \
+    -CA "$target/ca.crt" \
+    -CAkey "$target/ca.key" \
+    -set_serial 1001 \
+    -extfile "$TMP/server.ext" \
+    -out "$target/server.crt" >/dev/null 2>&1
+
+  openssl genrsa -out "$target/client.key" 3072 >/dev/null 2>&1
+  openssl req -new -sha256 \
+    -key "$target/client.key" \
+    -out "$TMP/client.csr" \
+    -subj '/CN=codex-on-vm-mac' >/dev/null 2>&1
+  cat >"$TMP/client.ext" <<'EOF'
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=clientAuth
+EOF
+  openssl x509 -req -sha256 -days 825 \
+    -in "$TMP/client.csr" \
+    -CA "$target/ca.crt" \
+    -CAkey "$target/ca.key" \
+    -set_serial 1002 \
+    -extfile "$TMP/client.ext" \
+    -out "$target/client.crt" >/dev/null 2>&1
+
+  python3 >"$target/tls-crypt.key" <<'PY'
+import secrets
+
+value = secrets.token_hex(256)
+print("-----BEGIN OpenVPN Static key V1-----")
+for index in range(0, len(value), 32):
+    print(value[index:index + 32])
+print("-----END OpenVPN Static key V1-----")
+PY
+
+  cat >"$target/server.conf" <<EOF
+port $VPN_PORT
+proto udp
+dev tun
+topology subnet
+server $VPN_NETWORK $VPN_NETMASK
+ca /etc/openvpn/server/ca.crt
+cert /etc/openvpn/server/server.crt
+key /etc/openvpn/server/server.key
+dh none
+ecdh-curve prime256v1
+tls-crypt /etc/openvpn/server/tls-crypt.key
+tls-version-min 1.2
+remote-cert-tls client
+verify-client-cert require
+data-ciphers AES-256-GCM:CHACHA20-POLY1305:AES-128-GCM
+data-ciphers-fallback AES-256-GCM
+auth SHA256
+keepalive 10 120
+explicit-exit-notify 1
+persist-key
+persist-tun
+user nobody
+group nogroup
+verb 3
+EOF
+
+  {
+    cat <<EOF
+client
+dev tun
+proto udp
+remote $SSH_FQDN $VPN_PORT
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+remote-cert-tls server
+verify-x509-name codex-on-vm-server name
+tls-version-min 1.2
+data-ciphers AES-256-GCM:CHACHA20-POLY1305:AES-128-GCM
+data-ciphers-fallback AES-256-GCM
+auth SHA256
+auth-nocache
+verb 3
+<ca>
+EOF
+    cat "$target/ca.crt"
+    printf '</ca>\n<cert>\n'
+    cat "$target/client.crt"
+    printf '</cert>\n<key>\n'
+    cat "$target/client.key"
+    printf '</key>\n<tls-crypt>\n'
+    cat "$target/tls-crypt.key"
+    printf '</tls-crypt>\n'
+  } >"$target/codex-on-vm.ovpn"
+  chmod 0600 "$target"/*
+
+}
+
+SOURCE_ROOT="$LOCAL_ROOT"
+if [[ "$local_complete" != "1" || "$ROTATE" == "1" ]]; then
+  STAGED_ROOT="$TMP/credentials"
+  generate_credentials "$STAGED_ROOT"
+  install -d -m 0700 "$(dirname "$LOCAL_ROOT")"
+  if [[ "$LOCAL_WAS_PRESENT" == "1" ]]; then
+    LOCAL_BACKUP="${LOCAL_ROOT}.backup-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    [[ ! -e "$LOCAL_BACKUP" ]] || fail "local OpenVPN backup path already exists"
+    mv "$LOCAL_ROOT" "$LOCAL_BACKUP"
+  fi
+  mv "$STAGED_ROOT" "$LOCAL_ROOT"
+  LOCAL_PROMOTED=1
+  SOURCE_ROOT="$LOCAL_ROOT"
+fi
+validate_local_credentials "$SOURCE_ROOT"
+NEW_CA_FINGERPRINT="$(openssl x509 -in "$SOURCE_ROOT/ca.crt" -noout -fingerprint -sha256)"
+
+SERVER_BUNDLE="$TMP/server-bundle.tar"
+tar -C "$SOURCE_ROOT" -cf "$SERVER_BUNDLE" \
+  ca.crt server.crt server.key tls-crypt.key server.conf
+chmod 0600 "$SERVER_BUNDLE"
+
+REMOTE_STAGE="$(ssh "$VPN_SSH_ALIAS" 'umask 077; mktemp -d /tmp/codex-on-vm-openvpn.XXXXXX')"
+[[ "$REMOTE_STAGE" =~ ^/tmp/codex-on-vm-openvpn\.[A-Za-z0-9]+$ ]] ||
+  fail "remote OpenVPN staging path is invalid"
+scp "$VM_CONFIGURATOR" "$SERVER_BUNDLE" "$VPN_SSH_ALIAS:$REMOTE_STAGE/"
+printf -v install_command \
+  'sudo bash %q %q %q %q %q %q %q %q' \
+  "$REMOTE_STAGE/configure-codex-openvpn.sh" \
+  "$SSH_USERNAME" \
+  "$WORKSPACE_MOUNT" \
+  "$VPN_PORT" \
+  "$VPN_NETWORK" \
+  "$VPN_NETMASK" \
+  "$VPN_SERVER_ADDRESS" \
+  "$REMOTE_STAGE/server-bundle.tar"
+ssh "$VPN_SSH_ALIAS" "$install_command"
+REMOTE_COMMITTED=1
+
+write_private_file() {
+  local target="$1"
+  local temporary
+  install -d -m 0700 "$(dirname "$target")"
+  temporary="$(mktemp "$(dirname "$target")/.codex-on-vm.XXXXXX")"
+  cat >"$temporary"
+  chmod 0600 "$temporary"
+  mv -f "$temporary" "$target"
+}
+
+cat <<EOF | write_private_file "$SSH_CONFIG"
+Host $VPN_SSH_ALIAS
+  HostName $VPN_SERVER_ADDRESS
+  HostKeyAlias $SSH_FQDN
+  User $SSH_USERNAME
+  IdentityFile $MAC_PRIVATE_KEY
+  IdentitiesOnly yes
+  StrictHostKeyChecking yes
+  UserKnownHostsFile $KNOWN_HOSTS
+EOF
+
+printf 'OpenVPN server and Mac profile were reconciled over the connected VPN.\n'
+printf '  Profile: %s\n' "$CLIENT_PROFILE"
+printf '  SSH after connecting: ssh %s\n' "$VPN_SSH_ALIAS"
+if [[ -n "$LOCAL_BACKUP" ]]; then
+  printf '  Previous credentials: %s\n' "$LOCAL_BACKUP"
+fi
+__CODEX_VM_HELPER_END__ openvpn-setup.sh
 
 __CODEX_VM_HELPER_BEGIN__ remote-control-recover.sh
 #!/usr/bin/env bash
@@ -1533,299 +1755,6 @@ az vm run-command invoke \
 
 printf 'Remote Control recovery completed through Azure Run Command; SSH remained closed.\n'
 __CODEX_VM_HELPER_END__ remote-control-recover.sh
-
-__CODEX_VM_HELPER_BEGIN__ ssh-open.sh
-#!/usr/bin/env bash
-set -euo pipefail
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TF_DIR="$ROOT/deployment/prod/tf"
-STATE_FILE="${CODEX_SSH_STATE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/codex-on-vm/ssh-access.json}"
-LOCK_DIR="${STATE_FILE}.lock"
-RULE_NAME=""
-LOCK_HELD=0
-RULE_CREATED=0
-SUCCESS=0
-RESOURCE_GROUP=""
-NSG_NAME=""
-
-fail() {
-  printf 'SSH open failed: %s\n' "$1" >&2
-  exit 1
-}
-
-cleanup_on_exit() {
-  local status=$?
-  set +e
-  if [[ "$SUCCESS" != "1" && "$RULE_CREATED" == "1" ]]; then
-    az network nsg rule delete --resource-group "$RESOURCE_GROUP" --nsg-name "$NSG_NAME" --name "$RULE_NAME" --only-show-errors >/dev/null 2>&1
-    if ! az network nsg rule show --resource-group "$RESOURCE_GROUP" --nsg-name "$NSG_NAME" --name "$RULE_NAME" --only-show-errors >/dev/null 2>&1; then
-      rm -f "$STATE_FILE"
-    else
-      printf 'SSH open cleanup warning: the temporary rule may remain; run scripts/codex-vm.sh ssh-close\n' >&2
-    fi
-  fi
-  if [[ "$LOCK_HELD" == "1" ]]; then
-    rmdir "$LOCK_DIR" >/dev/null 2>&1 || true
-  fi
-  return "$status"
-}
-
-trap cleanup_on_exit EXIT
-trap 'exit 130' INT TERM
-
-for command in az curl python3 terraform; do
-  command -v "$command" >/dev/null || fail "missing required command: $command"
-done
-install -d -m 0700 "$(dirname "$STATE_FILE")"
-mkdir "$LOCK_DIR" 2>/dev/null || fail "another temporary SSH operation is running"
-LOCK_HELD=1
-[[ ! -e "$STATE_FILE" ]] || fail "temporary SSH state already exists; run scripts/codex-vm.sh ssh-close"
-
-CONNECTION="$(terraform -chdir="$TF_DIR" output -json connection)"
-IFS=$'\t' read -r SUBSCRIPTION_ID RESOURCE_GROUP NSG_NAME RULE_NAME SSH_ALIAS <<<"$(CONNECTION="$CONNECTION" python3 - <<'PY'
-import json
-import os
-
-value = json.loads(os.environ["CONNECTION"])
-print("\t".join(value[key] for key in ("subscription_id", "resource_group_name", "network_security_group_name", "temporary_ssh_rule_name", "ssh_alias")))
-PY
-)"
-[[ "$(az account show --query id --output tsv)" == "$SUBSCRIPTION_ID" ]] || fail "Azure CLI is using a different subscription"
-
-PUBLIC_IP="$(curl -4fsS --max-time 10 https://api.ipify.org)"
-PUBLIC_IP_CIDR="$(PUBLIC_IP="$PUBLIC_IP" python3 - <<'PY'
-import ipaddress
-import os
-
-address = ipaddress.IPv4Address(os.environ["PUBLIC_IP"])
-if not address.is_global:
-    raise SystemExit("current public IPv4 address is not globally routable")
-print(f"{address}/32")
-PY
-)"
-if az network nsg rule show --resource-group "$RESOURCE_GROUP" --nsg-name "$NSG_NAME" --name "$RULE_NAME" --only-show-errors >/dev/null 2>&1; then
-  fail "the temporary SSH rule already exists; run scripts/codex-vm.sh ssh-close"
-fi
-
-STATE_FILE="$STATE_FILE" SUBSCRIPTION_ID="$SUBSCRIPTION_ID" RESOURCE_GROUP="$RESOURCE_GROUP" NSG_NAME="$NSG_NAME" RULE_NAME="$RULE_NAME" PUBLIC_IP_CIDR="$PUBLIC_IP_CIDR" SSH_ALIAS="$SSH_ALIAS" python3 - <<'PY'
-import json
-import os
-import pathlib
-
-path = pathlib.Path(os.environ["STATE_FILE"])
-value = {key.lower(): os.environ[key] for key in ("SUBSCRIPTION_ID", "RESOURCE_GROUP", "NSG_NAME", "RULE_NAME", "PUBLIC_IP_CIDR", "SSH_ALIAS")}
-temporary = path.with_suffix(path.suffix + ".tmp")
-temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-temporary.chmod(0o600)
-temporary.replace(path)
-PY
-
-az network nsg rule create \
-  --resource-group "$RESOURCE_GROUP" \
-  --nsg-name "$NSG_NAME" \
-  --name "$RULE_NAME" \
-  --priority 100 \
-  --direction Inbound \
-  --access Allow \
-  --protocol Tcp \
-  --source-address-prefixes "$PUBLIC_IP_CIDR" \
-  --source-port-ranges '*' \
-  --destination-address-prefixes '*' \
-  --destination-port-ranges 22 \
-  --only-show-errors >/dev/null
-RULE_CREATED=1
-
-SOURCE="$(az network nsg rule show --resource-group "$RESOURCE_GROUP" --nsg-name "$NSG_NAME" --name "$RULE_NAME" --query sourceAddressPrefix --output tsv --only-show-errors)"
-PORT="$(az network nsg rule show --resource-group "$RESOURCE_GROUP" --nsg-name "$NSG_NAME" --name "$RULE_NAME" --query destinationPortRange --output tsv --only-show-errors)"
-ACCESS="$(az network nsg rule show --resource-group "$RESOURCE_GROUP" --nsg-name "$NSG_NAME" --name "$RULE_NAME" --query access --output tsv --only-show-errors)"
-[[ "$SOURCE" == "$PUBLIC_IP_CIDR" && "$PORT" == "22" && "$ACCESS" == "Allow" ]] || fail "temporary rule read-back did not match the requested /32 TCP/22 access"
-
-SUCCESS=1
-printf 'Temporary SSH opened for %s. Connect with: ssh %s\n' "$PUBLIC_IP_CIDR" "$SSH_ALIAS"
-printf 'Close it when finished with: scripts/codex-vm.sh ssh-close\n'
-__CODEX_VM_HELPER_END__ ssh-open.sh
-
-__CODEX_VM_HELPER_BEGIN__ ssh-close.sh
-#!/usr/bin/env bash
-set -euo pipefail
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TF_DIR="$ROOT/deployment/prod/tf"
-STATE_FILE="${CODEX_SSH_STATE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/codex-on-vm/ssh-access.json}"
-LOCK_DIR="${STATE_FILE}.lock"
-RULE_NAME=""
-LOCK_HELD=0
-
-fail() {
-  printf 'SSH close failed: %s\n' "$1" >&2
-  exit 1
-}
-
-cleanup_on_exit() {
-  local status=$?
-  if [[ "$LOCK_HELD" == "1" ]]; then
-    rmdir "$LOCK_DIR" >/dev/null 2>&1 || true
-  fi
-  return "$status"
-}
-
-trap cleanup_on_exit EXIT
-trap 'exit 130' INT TERM
-
-for command in az python3 terraform; do
-  command -v "$command" >/dev/null || fail "missing required command: $command"
-done
-install -d -m 0700 "$(dirname "$STATE_FILE")"
-mkdir "$LOCK_DIR" 2>/dev/null || fail "another temporary SSH operation is running"
-LOCK_HELD=1
-
-if [[ -f "$STATE_FILE" ]]; then
-  IFS=$'\t' read -r SUBSCRIPTION_ID RESOURCE_GROUP NSG_NAME RULE_NAME <<<"$(STATE_FILE="$STATE_FILE" python3 - <<'PY'
-import json
-import os
-
-with open(os.environ["STATE_FILE"], encoding="utf-8") as handle:
-    value = json.load(handle)
-print("\t".join(value[key] for key in ("subscription_id", "resource_group", "nsg_name", "rule_name")))
-PY
-)"
-else
-  CONNECTION="$(terraform -chdir="$TF_DIR" output -json connection)"
-  IFS=$'\t' read -r SUBSCRIPTION_ID RESOURCE_GROUP NSG_NAME RULE_NAME <<<"$(CONNECTION="$CONNECTION" python3 - <<'PY'
-import json
-import os
-
-value = json.loads(os.environ["CONNECTION"])
-print("\t".join(value[key] for key in ("subscription_id", "resource_group_name", "network_security_group_name", "temporary_ssh_rule_name")))
-PY
-)"
-fi
-
-[[ "$(az account show --query id --output tsv)" == "$SUBSCRIPTION_ID" ]] || fail "Azure CLI is using a different subscription; recovery state was retained"
-
-if az network nsg rule show --resource-group "$RESOURCE_GROUP" --nsg-name "$NSG_NAME" --name "$RULE_NAME" --only-show-errors >/dev/null 2>&1; then
-  az network nsg rule delete --resource-group "$RESOURCE_GROUP" --nsg-name "$NSG_NAME" --name "$RULE_NAME" --only-show-errors >/dev/null
-fi
-for _attempt in {1..30}; do
-  if ! az network nsg rule show --resource-group "$RESOURCE_GROUP" --nsg-name "$NSG_NAME" --name "$RULE_NAME" --only-show-errors >/dev/null 2>&1; then
-    rm -f "$STATE_FILE"
-    printf 'Temporary SSH rule is closed.\n'
-    exit 0
-  fi
-  sleep 2
-done
-fail "temporary SSH rule is still present; recovery state was retained"
-__CODEX_VM_HELPER_END__ ssh-close.sh
-
-__CODEX_VM_HELPER_BEGIN__ workspace-open.sh
-#!/usr/bin/env bash
-set -euo pipefail
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TF_DIR="$ROOT/deployment/prod/tf"
-SUCCESS=0
-SSH_OPENED=0
-MOUNT_PATH=""
-
-fail() {
-  printf 'Workspace open failed: %s\n' "$1" >&2
-  exit 1
-}
-
-cleanup_on_exit() {
-  local status=$?
-  set +e
-  if [[ "$SUCCESS" != "1" ]]; then
-    if [[ -n "$MOUNT_PATH" ]] && mount | grep -F " on $MOUNT_PATH " >/dev/null 2>&1; then
-      diskutil unmount "$MOUNT_PATH" >/dev/null 2>&1 || true
-    fi
-    if [[ "$SSH_OPENED" == "1" ]]; then
-      "$ROOT/scripts/ssh-close.sh" >/dev/null 2>&1 || true
-    fi
-  fi
-  return "$status"
-}
-
-trap cleanup_on_exit EXIT
-trap 'exit 130' INT TERM
-
-[[ "$#" -le 1 ]] || fail "expected zero or one remote path argument"
-REMOTE_PATH_OVERRIDE="${1:-}"
-if [[ -n "$REMOTE_PATH_OVERRIDE" ]]; then
-  [[ "$REMOTE_PATH_OVERRIDE" == /* ]] || fail "remote path must be absolute"
-  [[ "$REMOTE_PATH_OVERRIDE" != *$'\n'* && "$REMOTE_PATH_OVERRIDE" != *$'\r'* && "$REMOTE_PATH_OVERRIDE" != *$'\t'* ]] || fail "remote path must not contain control characters"
-fi
-
-[[ "$(uname -s)" == "Darwin" ]] || fail "this helper is for macOS"
-for command in diskutil find mount python3 sshfs terraform; do
-  command -v "$command" >/dev/null || fail "missing required command: $command"
-done
-
-CONNECTION="$(terraform -chdir="$TF_DIR" output -json connection)"
-IFS=$'\t' read -r SSH_ALIAS DEFAULT_REMOTE_PATH DEFAULT_MOUNT <<<"$(CONNECTION="$CONNECTION" python3 - <<'PY'
-import json
-import os
-
-value = json.loads(os.environ["CONNECTION"])
-print("\t".join(value[key] for key in ("ssh_alias", "workspace_mount_path", "local_mount_path")))
-PY
-)"
-REMOTE_PATH="${REMOTE_PATH_OVERRIDE:-$DEFAULT_REMOTE_PATH}"
-MOUNT_PATH="${CODEX_WORKSPACE_LOCAL_MOUNT_PATH:-$DEFAULT_MOUNT}"
-mkdir -p "$MOUNT_PATH"
-if mount | grep -F " on $MOUNT_PATH " >/dev/null 2>&1; then
-  fail "$MOUNT_PATH is already mounted"
-fi
-[[ -z "$(find "$MOUNT_PATH" -mindepth 1 -maxdepth 1 -print -quit)" ]] || fail "$MOUNT_PATH must be empty"
-
-"$ROOT/scripts/ssh-open.sh"
-SSH_OPENED=1
-sshfs "$SSH_ALIAS:$REMOTE_PATH" "$MOUNT_PATH" \
-  -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,volname=codex-on-vm
-mount | grep -F " on $MOUNT_PATH " >/dev/null || fail "SSHFS mount read-back failed"
-
-SUCCESS=1
-printf 'Workspace mounted at %s. Run scripts/codex-vm.sh workspace-close when finished.\n' "$MOUNT_PATH"
-__CODEX_VM_HELPER_END__ workspace-open.sh
-
-__CODEX_VM_HELPER_BEGIN__ workspace-close.sh
-#!/usr/bin/env bash
-set -euo pipefail
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TF_DIR="$ROOT/deployment/prod/tf"
-
-fail() {
-  printf 'Workspace close failed: %s\n' "$1" >&2
-  exit 1
-}
-
-for command in diskutil mount python3 terraform; do
-  command -v "$command" >/dev/null || fail "missing required command: $command"
-done
-
-CONNECTION="$(terraform -chdir="$TF_DIR" output -json connection)"
-DEFAULT_MOUNT="$(CONNECTION="$CONNECTION" python3 - <<'PY'
-import json
-import os
-
-print(json.loads(os.environ["CONNECTION"])["local_mount_path"])
-PY
-)"
-MOUNT_PATH="${CODEX_WORKSPACE_LOCAL_MOUNT_PATH:-$DEFAULT_MOUNT}"
-
-if mount | grep -F " on $MOUNT_PATH " >/dev/null 2>&1; then
-  diskutil unmount "$MOUNT_PATH" >/dev/null || fail "could not unmount $MOUNT_PATH; SSH access remains open for recovery"
-fi
-if mount | grep -F " on $MOUNT_PATH " >/dev/null 2>&1; then
-  fail "$MOUNT_PATH is still mounted; SSH access remains open for recovery"
-fi
-"$ROOT/scripts/ssh-close.sh"
-printf 'Workspace unmounted and temporary SSH closed.\n'
-__CODEX_VM_HELPER_END__ workspace-close.sh
-
-
 __CODEX_VM_HELPER_BEGIN__ ensure-codex-remote-control.sh
 #!/usr/bin/env bash
 set -euo pipefail
@@ -2321,12 +2250,250 @@ mv -f "$TEMP_BIN" "$BIN_DIR/codex"
 "$BIN_DIR/codex" --version >/dev/null
 __CODEX_VM_HELPER_END__ install-verified-codex.sh
 
+__CODEX_VM_HELPER_BEGIN__ configure-codex-openvpn.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 6 && $# -ne 7 ]]; then
+  printf 'usage: %s <admin-user> <projects-mount> <port> <network> <netmask> <server-address> [server-bundle]\n' "$0" >&2
+  exit 64
+fi
+
+ADMIN_USER="$1"
+MOUNT_PATH="$2"
+VPN_PORT="$3"
+VPN_NETWORK="$4"
+VPN_NETMASK="$5"
+VPN_SERVER_ADDRESS="$6"
+BUNDLE_PATH="${7:-}"
+VM_ROOT="${CODEX_VM_ROOT:-}"
+TEST_MODE="${CODEX_VM_TEST_MODE:-0}"
+SERVICE="openvpn-server@codex-vm.service"
+PERSISTENT_ROOT=""
+RUNTIME_ROOT=""
+STAGE_ROOT=""
+BUNDLE_STAGE_ROOT=""
+PREVIOUS_PERSISTENT=""
+TRANSACTION_ACTIVE=0
+TRANSACTION_COMMITTED=0
+
+fail() {
+  printf 'OpenVPN VM configuration failed: %s\n' "$1" >&2
+  exit 1
+}
+
+root_path() {
+  printf '%s%s\n' "$VM_ROOT" "$1"
+}
+
+cleanup() {
+  local status=$?
+  set +e
+  [[ -z "$STAGE_ROOT" ]] || rm -rf -- "$STAGE_ROOT"
+  [[ -z "$BUNDLE_STAGE_ROOT" ]] || rm -rf -- "$BUNDLE_STAGE_ROOT"
+  if [[ "$status" != "0" && "$TRANSACTION_ACTIVE" == "1" && "$TRANSACTION_COMMITTED" != "1" ]]; then
+    rm -rf -- "$PERSISTENT_ROOT"
+    if [[ -n "$PREVIOUS_PERSISTENT" && -d "$PREVIOUS_PERSISTENT" ]]; then
+      mv "$PREVIOUS_PERSISTENT" "$PERSISTENT_ROOT"
+      PREVIOUS_PERSISTENT=""
+      install_material_tree_runtime "$PERSISTENT_ROOT" "$RUNTIME_ROOT" >/dev/null 2>&1 || true
+      systemctl restart "$SERVICE" >/dev/null 2>&1 || true
+    else
+      rm -rf -- "$RUNTIME_ROOT"
+      systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
+    fi
+  fi
+  if [[ -n "$BUNDLE_PATH" ]]; then
+    rm -f -- "$BUNDLE_PATH"
+  fi
+  exit "$status"
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+[[ "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || fail "admin user is invalid"
+[[ "$MOUNT_PATH" == /* && "$MOUNT_PATH" != *$'\n'* && "$MOUNT_PATH" != *$'\r'* && "$MOUNT_PATH" != *$'\t'* ]] ||
+  fail "projects mount is invalid"
+[[ "$VPN_PORT" =~ ^[0-9]+$ ]] || fail "OpenVPN port is invalid"
+((VPN_PORT >= 1 && VPN_PORT <= 65535)) || fail "OpenVPN port is outside 1-65535"
+[[ -z "$VM_ROOT" || "$TEST_MODE" == "1" ]] || fail "CODEX_VM_ROOT is available only in test mode"
+if [[ -n "$BUNDLE_PATH" ]]; then
+  [[ "$BUNDLE_PATH" == /* && "$BUNDLE_PATH" != *$'\n'* && "$BUNDLE_PATH" != *$'\r'* && "$BUNDLE_PATH" != *$'\t'* ]] ||
+    fail "server bundle path is invalid"
+  [[ -f "$BUNDLE_PATH" ]] || fail "server bundle is missing"
+fi
+python3 - "$VPN_NETWORK" "$VPN_NETMASK" "$VPN_SERVER_ADDRESS" <<'PY'
+import ipaddress
+import sys
+
+network = ipaddress.IPv4Network((sys.argv[1], sys.argv[2]), strict=True)
+server = ipaddress.IPv4Address(sys.argv[3])
+if network.prefixlen != 24:
+    raise SystemExit("OpenVPN network must be a /24")
+if server != next(network.hosts()):
+    raise SystemExit("OpenVPN server address must be the first usable network address")
+PY
+
+MOUNT_PHYSICAL="$(root_path "$MOUNT_PATH")"
+[[ -d "$MOUNT_PHYSICAL" ]] || fail "projects mount is unavailable"
+if [[ "$TEST_MODE" != "1" ]]; then
+  mountpoint -q "$MOUNT_PHYSICAL" || fail "projects filesystem is not mounted"
+fi
+PERSISTENT_ROOT="$MOUNT_PHYSICAL/.codex-on-vm/openvpn/server"
+RUNTIME_ROOT="$(root_path /etc/openvpn/server)"
+if [[ -z "$BUNDLE_PATH" && ! -d "$PERSISTENT_ROOT" ]]; then
+  printf 'Persistent OpenVPN material is not present; skipping service restoration.\n'
+  exit 0
+fi
+for command in cmp openssl openvpn python3 systemctl tar; do
+  command -v "$command" >/dev/null || fail "missing required command: $command"
+done
+
+validate_server_material() {
+  local source="$1"
+  local key_pub cert_pub
+  for required in ca.crt server.crt server.key tls-crypt.key server.conf; do
+    [[ -f "$source/$required" ]] || fail "server material is missing $required"
+  done
+  [[ ! -e "$source/ca.key" && ! -e "$source/client.key" && ! -e "$source/client.crt" ]] ||
+    fail "server material contains client or CA private state"
+  openssl verify -CAfile "$source/ca.crt" "$source/server.crt" >/dev/null ||
+    fail "server certificate verification failed"
+  key_pub="$(mktemp)"
+  cert_pub="$(mktemp)"
+  openssl pkey -in "$source/server.key" -pubout -out "$key_pub" >/dev/null 2>&1 ||
+    fail "server private key is invalid"
+  openssl x509 -in "$source/server.crt" -pubkey -noout >"$cert_pub" ||
+    fail "server certificate is invalid"
+  cmp -s "$key_pub" "$cert_pub" || fail "server certificate does not match its private key"
+  rm -f "$key_pub" "$cert_pub"
+  grep -Fqx -- "port $VPN_PORT" "$source/server.conf" || fail "server configuration has the wrong port"
+  grep -Fqx -- 'proto udp' "$source/server.conf" || fail "server configuration must use UDP"
+  grep -Fqx -- "server $VPN_NETWORK $VPN_NETMASK" "$source/server.conf" ||
+    fail "server configuration has the wrong tunnel network"
+  grep -Fqx -- 'verify-client-cert require' "$source/server.conf" ||
+    fail "server configuration does not require client certificates"
+  grep -Fqx -- 'remote-cert-tls client' "$source/server.conf" ||
+    fail "server configuration does not require client certificate usage"
+  grep -Fqx -- 'tls-version-min 1.2' "$source/server.conf" ||
+    fail "server configuration has no TLS minimum"
+  grep -Fqx -- 'tls-crypt /etc/openvpn/server/tls-crypt.key' "$source/server.conf" ||
+    fail "server configuration does not use tls-crypt"
+  if grep -Eiq '^[[:space:]]*(push[[:space:]]+")?(redirect-gateway|dhcp-option|comp-lzo|compress|client-to-client)' "$source/server.conf"; then
+    fail "server configuration expands routing or weakens tunnel isolation"
+  fi
+}
+
+install_material_tree() {
+  local source="$1"
+  local target="$2"
+  local next="${target}.next.$$"
+  rm -rf -- "$next"
+  install -d -m 0700 "$next"
+  install -m 0644 "$source/ca.crt" "$next/ca.crt"
+  install -m 0644 "$source/server.crt" "$next/server.crt"
+  install -m 0600 "$source/server.key" "$next/server.key"
+  install -m 0600 "$source/tls-crypt.key" "$next/tls-crypt.key"
+  install -m 0644 "$source/server.conf" "$next/codex-vm.conf"
+  rm -rf -- "$target"
+  mv "$next" "$target"
+}
+
+activate_persistent_material() {
+  validate_server_material_runtime "$PERSISTENT_ROOT"
+  install -d -m 0755 "$(dirname "$RUNTIME_ROOT")"
+  install_material_tree_runtime "$PERSISTENT_ROOT" "$RUNTIME_ROOT"
+  systemctl daemon-reload || return 1
+  systemctl enable "$SERVICE" || return 1
+  systemctl restart "$SERVICE" || return 1
+  systemctl is-active --quiet "$SERVICE" || return 1
+}
+
+validate_server_material_runtime() {
+  local source="$1"
+  [[ -f "$source/codex-vm.conf" ]] || fail "persistent OpenVPN configuration is missing"
+  STAGE_ROOT="$(mktemp -d)"
+  install -m 0644 "$source/ca.crt" "$STAGE_ROOT/ca.crt"
+  install -m 0644 "$source/server.crt" "$STAGE_ROOT/server.crt"
+  install -m 0600 "$source/server.key" "$STAGE_ROOT/server.key"
+  install -m 0600 "$source/tls-crypt.key" "$STAGE_ROOT/tls-crypt.key"
+  install -m 0644 "$source/codex-vm.conf" "$STAGE_ROOT/server.conf"
+  validate_server_material "$STAGE_ROOT"
+  rm -rf -- "$STAGE_ROOT"
+  STAGE_ROOT=""
+}
+
+install_material_tree_runtime() {
+  local source="$1"
+  local target="$2"
+  STAGE_ROOT="$(mktemp -d)"
+  install -m 0644 "$source/ca.crt" "$STAGE_ROOT/ca.crt"
+  install -m 0644 "$source/server.crt" "$STAGE_ROOT/server.crt"
+  install -m 0600 "$source/server.key" "$STAGE_ROOT/server.key"
+  install -m 0600 "$source/tls-crypt.key" "$STAGE_ROOT/tls-crypt.key"
+  install -m 0644 "$source/codex-vm.conf" "$STAGE_ROOT/server.conf"
+  install_material_tree "$STAGE_ROOT" "$target"
+  rm -rf -- "$STAGE_ROOT"
+  STAGE_ROOT=""
+}
+
+if [[ -z "$BUNDLE_PATH" ]]; then
+  activate_persistent_material || fail "restored OpenVPN service did not become active"
+  printf 'OPENVPN_SERVER_READY=1\n'
+  exit 0
+fi
+
+BUNDLE_STAGE_ROOT="$(mktemp -d)"
+bundle_members="$(tar -tf "$BUNDLE_PATH" | sed 's#^\./##' | LC_ALL=C sort)"
+expected_members="$(printf '%s\n' ca.crt server.conf server.crt server.key tls-crypt.key | LC_ALL=C sort)"
+[[ "$bundle_members" == "$expected_members" ]] || fail "server bundle contains unexpected paths"
+tar -xf "$BUNDLE_PATH" -C "$BUNDLE_STAGE_ROOT"
+rm -f -- "$BUNDLE_PATH"
+BUNDLE_PATH=""
+validate_server_material "$BUNDLE_STAGE_ROOT"
+
+install -d -m 0700 "$(dirname "$PERSISTENT_ROOT")"
+if [[ -d "$PERSISTENT_ROOT" ]]; then
+  PREVIOUS_PERSISTENT="${PERSISTENT_ROOT}.previous.$$"
+  [[ ! -e "$PREVIOUS_PERSISTENT" ]] || fail "OpenVPN transaction backup already exists"
+  mv "$PERSISTENT_ROOT" "$PREVIOUS_PERSISTENT"
+fi
+TRANSACTION_ACTIVE=1
+install_material_tree "$BUNDLE_STAGE_ROOT" "$PERSISTENT_ROOT"
+
+if ! activate_persistent_material; then
+  rm -rf -- "$PERSISTENT_ROOT" "$RUNTIME_ROOT"
+  if [[ -n "$PREVIOUS_PERSISTENT" && -d "$PREVIOUS_PERSISTENT" ]]; then
+    mv "$PREVIOUS_PERSISTENT" "$PERSISTENT_ROOT"
+    if ! activate_persistent_material; then
+      TRANSACTION_ACTIVE=0
+      PREVIOUS_PERSISTENT=""
+      fail "OpenVPN replacement and rollback both failed"
+    fi
+    PREVIOUS_PERSISTENT=""
+  else
+    systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
+  fi
+  TRANSACTION_ACTIVE=0
+  fail "OpenVPN replacement did not become active; previous configuration was restored"
+fi
+
+if [[ -n "$PREVIOUS_PERSISTENT" ]]; then
+  rm -rf -- "$PREVIOUS_PERSISTENT"
+  PREVIOUS_PERSISTENT=""
+fi
+TRANSACTION_COMMITTED=1
+TRANSACTION_ACTIVE=0
+printf 'OPENVPN_SERVER_READY=1\n'
+__CODEX_VM_HELPER_END__ configure-codex-openvpn.sh
+
 __CODEX_VM_HELPER_BEGIN__ prepare-codex-vm.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 6 ]]; then
-  printf 'usage: %s <admin-user> <projects-mount> <disk-lun> <codex-version> <package-url> <package-sha256>\n' "$0" >&2
+if [[ $# -ne 10 ]]; then
+  printf 'usage: %s <admin-user> <projects-mount> <disk-lun> <codex-version> <package-url> <package-sha256> <openvpn-port> <openvpn-network> <openvpn-netmask> <openvpn-server-address>\n' "$0" >&2
   exit 64
 fi
 
@@ -2336,6 +2503,10 @@ DISK_LUN="$3"
 CODEX_VERSION="$4"
 CODEX_PACKAGE_URL="$5"
 CODEX_PACKAGE_SHA256="$6"
+OPENVPN_PORT="$7"
+OPENVPN_NETWORK="$8"
+OPENVPN_NETMASK="$9"
+OPENVPN_SERVER_ADDRESS="${10}"
 VM_ROOT="${CODEX_VM_ROOT:-}"
 TEST_MODE="${CODEX_VM_TEST_MODE:-0}"
 DATA_DISK="${CODEX_VM_DATA_DISK:-/dev/disk/azure/data/by-lun/$DISK_LUN}"
@@ -2399,6 +2570,7 @@ install_packages() {
         fail2ban \
         git \
         jq \
+        openvpn \
         parted \
         unattended-upgrades; then
       return
@@ -2406,6 +2578,20 @@ install_packages() {
     sleep 10
   done
   fail "Ubuntu package installation did not converge"
+}
+
+restore_openvpn() {
+  local configurator
+  configurator="$(root_path /usr/local/sbin/configure-codex-openvpn)"
+  [[ -x "$configurator" ]] || fail "OpenVPN configurator is unavailable"
+  CODEX_VM_ROOT="$VM_ROOT" CODEX_VM_TEST_MODE="$TEST_MODE" \
+    "$configurator" \
+    "$ADMIN_USER" \
+    "$MOUNT_PATH" \
+    "$OPENVPN_PORT" \
+    "$OPENVPN_NETWORK" \
+    "$OPENVPN_NETMASK" \
+    "$OPENVPN_SERVER_ADDRESS"
 }
 
 configure_apparmor() {
@@ -2651,11 +2837,16 @@ finish_preparation() {
 [[ "$CODEX_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "Codex version must use x.y.z format"
 [[ "$CODEX_PACKAGE_URL" == https://* ]] || fail "Codex package URL must use HTTPS"
 [[ "$CODEX_PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "Codex package digest is invalid"
+[[ "$OPENVPN_PORT" =~ ^[0-9]+$ ]] || fail "OpenVPN port is invalid"
+[[ "$OPENVPN_NETWORK" =~ ^[0-9.]+$ ]] || fail "OpenVPN network is invalid"
+[[ "$OPENVPN_NETMASK" =~ ^[0-9.]+$ ]] || fail "OpenVPN netmask is invalid"
+[[ "$OPENVPN_SERVER_ADDRESS" =~ ^[0-9.]+$ ]] || fail "OpenVPN server address is invalid"
 [[ -z "$VM_ROOT" || "$TEST_MODE" == "1" ]] || fail "CODEX_VM_ROOT is available only in test mode"
 
 install_packages
 configure_apparmor
 prepare_workspace_disk
+restore_openvpn
 configure_runtime_files
 install_codex
 finish_preparation

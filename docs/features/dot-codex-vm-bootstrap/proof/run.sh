@@ -69,16 +69,6 @@ make_harness() {
   cp "$SCRIPT" "$harness/scripts/dot-codex-bootstrap.sh"
   chmod +x "$harness/scripts/dot-codex-bootstrap.sh"
 
-  cat >"$harness/scripts/ssh-open.sh" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-printf 'open\n' >>"$FAKE_LIFECYCLE_LOG"
-SH
-  cat >"$harness/scripts/ssh-close.sh" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-printf 'close\n' >>"$FAKE_LIFECYCLE_LOG"
-SH
   cat >"$harness/scripts/remote-control-recover.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -89,9 +79,15 @@ SH
 #!/usr/bin/env bash
 printf 'Darwin\n'
 SH
-  cat >"$fixture/bin/ssh" <<'SH'
+cat >"$fixture/bin/ssh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ " $* " == *" BatchMode=yes "* ]]; then
+  printf 'ssh-probe\n' >>"$FAKE_LIFECYCLE_LOG"
+  [[ "${FAKE_VPN_UNREACHABLE:-0}" != "1" && "${FAKE_SSH_FAIL:-0}" != "1" ]] || exit 23
+  [[ "${*: -2:1}" == "$FAKE_EXPECTED_SSH_ALIAS" ]] || exit 92
+  exit 0
+fi
 printf 'ssh\n' >>"$FAKE_LIFECYCLE_LOG"
 [[ "${FAKE_SSH_FAIL:-0}" != "1" ]] || exit 23
 [[ "$#" == "2" ]] || exit 91
@@ -100,8 +96,6 @@ printf 'ssh\n' >>"$FAKE_LIFECYCLE_LOG"
 HOME="$FAKE_REMOTE_HOME" bash -c "$2"
 SH
   chmod +x \
-    "$harness/scripts/ssh-open.sh" \
-    "$harness/scripts/ssh-close.sh" \
     "$harness/scripts/remote-control-recover.sh" \
     "$fixture/bin/uname" \
     "$fixture/bin/ssh"
@@ -177,12 +171,12 @@ run_helper() {
     FAKE_REMOTE_CONNECTING_FILE="$fixture/remote-connecting" \
     FAKE_REMOTE_INVALID_COUNT_FILE="$fixture/remote-invalid-count" \
     FAKE_REMOTE_HOME="$fixture/remote-home" \
-    FAKE_EXPECTED_SSH_ALIAS="proof-vm" \
+    FAKE_EXPECTED_SSH_ALIAS="codex-on-vm-vpn" \
     DOT_CODEX_REPOSITORY_URL="$origin" \
     DOT_CODEX_REMOTE_DIR="$remote_dir" \
     DOT_CODEX_REMOTE_CONTROL_RETRY_SECONDS="0" \
     DOT_CODEX_REMOTE_RECOVERY_HELPER="$fixture/remote-home/ensure-codex-remote-control" \
-    CODEX_VM_SSH_ALIAS="proof-vm" \
+    CODEX_VM_VPN_SSH_ALIAS="codex-on-vm-vpn" \
     "$fixture/harness/scripts/dot-codex-bootstrap.sh"
 }
 
@@ -217,26 +211,22 @@ assert_file_contains "$MAIN_REMOTE_DIR/runtime-state.bin" "preserved runtime"
 assert_backup_count "$MAIN_FIXTURE/remote-home" 1
 assert_patterns_in_order \
   "$MAIN_FIXTURE/lifecycle.log" \
-  "close" \
-  "open" \
+  "ssh-probe" \
   "ssh" \
   "recover" \
   "ssh" \
-  "close" \
   "recover"
-[[ "$(tail -n 1 "$MAIN_FIXTURE/lifecycle.log")" == "recover" ]] || fail "final Azure recovery did not run after SSH close"
+[[ "$(tail -n 1 "$MAIN_FIXTURE/lifecycle.log")" == "recover" ]] || fail "final Azure recovery did not run"
 assert_patterns_in_order \
   "$MAIN_FIXTURE/first-output.log" \
-  "[1/8] Validate local inputs and helper availability" \
+  "[1/6] Validate local inputs and helper availability" \
   'Remote clone: $HOME/projects/dot-codex' \
-  "[2/8] Normalize temporary SSH state" \
-  "[3/8] Open restricted temporary SSH" \
-  "[4/8] Reconcile and repair current Remote Control" \
-  "[5/8] Bootstrap or repair dot-codex on the VM" \
-  "[6/8] Close temporary SSH" \
-  "[7/8] Verify Remote Control after SSH closure" \
+  "[2/6] Verify OpenVPN SSH access" \
+  "[3/6] Reconcile and repair current Remote Control" \
+  "[4/6] Bootstrap or repair dot-codex on the VM" \
+  "[5/6] Verify Remote Control" \
   "Remote Control verified connected." \
-  "[8/8] Complete"
+  "[6/6] Complete"
 assert_file_contains "$MAIN_FIXTURE/codex.log" "app-server daemon stop"
 assert_file_contains "$MAIN_FIXTURE/codex.log" "remote-control start --json"
 assert_file_contains "$MAIN_FIXTURE/remote-recovery.log" "remote-recover"
@@ -270,7 +260,7 @@ fi
 assert_file_contains "$MAIN_FIXTURE/codex.log" "login status"
 assert_file_contains "$MAIN_FIXTURE/codex.log" "remote-control start --json"
 [[ ! -s "$MAIN_FIXTURE/remote-recovery.log" ]] || fail "idempotent rerun invoked unnecessary VM process recovery"
-[[ "$(tail -n 1 "$MAIN_FIXTURE/lifecycle.log")" == "recover" ]] || fail "second run did not close SSH before final recovery"
+[[ "$(tail -n 1 "$MAIN_FIXTURE/lifecycle.log")" == "recover" ]] || fail "second run did not perform final recovery"
 grep -F 'Symlink already correct; no backup or migration needed.' "$MAIN_FIXTURE/second-output.log" >/dev/null ||
   fail "idempotent rerun did not explain the no-op symlink decision"
 
@@ -365,7 +355,7 @@ fi
 assert_file_contains "$DIRTY_REMOTE_DIR/AGENTS.md" "local tracked edit that must survive"
 [[ -d "$DIRTY_FIXTURE/remote-home/.codex" && ! -L "$DIRTY_FIXTURE/remote-home/.codex" ]] || fail "dirty-clone refusal changed .codex"
 assert_backup_count "$DIRTY_FIXTURE/remote-home" 0
-[[ "$(tail -n 1 "$DIRTY_FIXTURE/lifecycle.log")" == "close" ]] || fail "SSH was not closed after dirty-clone refusal"
+! rg -n '^(open|close)$' "$DIRTY_FIXTURE/lifecycle.log" >/dev/null || fail "dirty-clone refusal used a public SSH lifecycle"
 assert_file_contains "$DIRTY_FIXTURE/codex.log" "login status"
 if grep -Fqx 'app-server daemon stop' "$DIRTY_FIXTURE/codex.log" ||
   grep -Fqx 'remote-control start --json' "$DIRTY_FIXTURE/codex.log"; then
@@ -409,8 +399,8 @@ assert_file_contains "$CONFLICT_REMOTE_DIR/revision.txt" "local conflicting revi
 [[ -d "$CONFLICT_FIXTURE/remote-home/.codex" && ! -L "$CONFLICT_FIXTURE/remote-home/.codex" ]] ||
   fail "conflicting rebase changed .codex"
 assert_backup_count "$CONFLICT_FIXTURE/remote-home" 0
-[[ "$(tail -n 1 "$CONFLICT_FIXTURE/lifecycle.log")" == "close" ]] ||
-  fail "SSH was not closed after conflicting rebase"
+! rg -n '^(open|close)$' "$CONFLICT_FIXTURE/lifecycle.log" >/dev/null ||
+  fail "conflicting rebase used a public SSH lifecycle"
 if grep -Fqx 'app-server daemon stop' "$CONFLICT_FIXTURE/codex.log" ||
   grep -Fqx 'remote-control start --json' "$CONFLICT_FIXTURE/codex.log"; then
   fail "conflicting rebase changed daemon state"
@@ -436,7 +426,7 @@ if grep -Fi 'on the VM' "$AUTH_FIXTURE/output.log" >/dev/null; then
 fi
 [[ -d "$AUTH_FIXTURE/remote-home/.codex" && ! -L "$AUTH_FIXTURE/remote-home/.codex" ]] || fail "missing-auth refusal changed .codex"
 assert_backup_count "$AUTH_FIXTURE/remote-home" 0
-[[ "$(tail -n 1 "$AUTH_FIXTURE/lifecycle.log")" == "close" ]] || fail "SSH was not closed after missing-auth refusal"
+! rg -n '^(open|close)$' "$AUTH_FIXTURE/lifecycle.log" >/dev/null || fail "missing-auth refusal used a public SSH lifecycle"
 if grep -Fqx 'recover' "$AUTH_FIXTURE/lifecycle.log"; then
   fail "missing-auth refusal invoked Azure recovery before login was established"
 fi
@@ -457,7 +447,7 @@ if FAKE_SSH_FAIL=1 run_helper \
   "$SSH_FAILURE_FIXTURE/remote-home/dot-codex"; then
   fail "transport failure unexpectedly succeeded"
 fi
-[[ "$(tail -n 1 "$SSH_FAILURE_FIXTURE/lifecycle.log")" == "close" ]] || fail "SSH was not closed after transport failure"
+[[ "$(tail -n 1 "$SSH_FAILURE_FIXTURE/lifecycle.log")" == "ssh-probe" ]] || fail "disconnected VPN did not fail at the reachability probe"
 [[ -d "$SSH_FAILURE_FIXTURE/remote-home/.codex" && ! -L "$SSH_FAILURE_FIXTURE/remote-home/.codex" ]] || fail "transport failure changed .codex"
 
 ROLLBACK_FIXTURE="$PROOF_TMP/rollback"
@@ -472,7 +462,7 @@ if FAKE_CODEX_FAIL_START=1 FAKE_REMOTE_RECOVERY_FAIL=1 run_helper \
   "$ROLLBACK_REMOTE_DIR" >"$ROLLBACK_FIXTURE/output.log" 2>&1; then
   fail "restart failure unexpectedly succeeded"
 fi
-[[ "$(tail -n 1 "$ROLLBACK_FIXTURE/lifecycle.log")" == "close" ]] || fail "SSH was not closed after rollback"
+! rg -n '^(open|close)$' "$ROLLBACK_FIXTURE/lifecycle.log" >/dev/null || fail "rollback used a public SSH lifecycle"
 [[ -d "$ROLLBACK_REMOTE_DIR/.git" ]] || fail "quoted remote-path override did not reach the clone boundary"
 assert_file_contains "$ROLLBACK_FIXTURE/codex.log" "app-server daemon stop"
 assert_file_contains "$ROLLBACK_FIXTURE/codex.log" "remote-control start --json"

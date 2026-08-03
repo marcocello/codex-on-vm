@@ -1,9 +1,10 @@
 # Completion
 
-- Outcome: complete. Codex sign-in and device pairing are separate actions, pairing requires login, and the interactive menu is grouped by function.
-- Red proof: FAIL at `proof/runs/20260725T104741081484Z` because the pre-change console omitted the required `sign-in` command.
-- Focused proof: PASS at `proof/runs/20260725T105358937004Z`; final proof review strengthened subtitle read-back to require exact ANSI-normalized menu lines.
-- Managed-workspace integration proof: PASS at `../remote-control-managed-workspace/proof/runs/20260725T105042747738Z`.
-- Dot-codex missing-login integration proof: PASS at `../dot-codex-vm-bootstrap/proof/runs/20260725T105102050661Z`.
-- Repository gate: the applicable `other` profile and Git diff checks PASS. The aggregate reports only the repository's pre-existing missing root `AGENTS.md`.
-- Fresh evaluator: PASS. It found the behavior aligned with the user goal, the single-script/manual-Terraform architecture preserved, realistic PTY and extracted-helper coverage, no plausible central broken-pass, and only acceptable live-provider gaps.
+- Outcome: complete. The console is a visible, one-shot launcher with exactly options 1–5. Options 2–5 require a prepared VM and connected OpenVPN profile; setup remains the Azure Run Command recovery exception.
+- Retained red proof: `../self-hosted-openvpn-access/proof/runs/20260803T101523954000Z` failed because ordinary option-5 repair generated replacement trust when the local trust directory was missing.
+- Final operator proof: PASS at `proof/runs/20260803T101648704482Z`; it drives every real menu option through a pseudo-terminal, verifies exact mappings and visible output, rejects terminal clearing, checks disconnected guidance, and exercises the extracted production OpenVPN helper.
+- Preparation visibility repair: PASS at `proof/runs/20260803T105117799224Z`; a deliberately delayed Azure Run Command prints its target and periodic elapsed time, and the captured process group exits cleanly without harness termination.
+- OpenVPN integration proof: PASS at `../self-hosted-openvpn-access/proof/runs/20260803T101621334754Z`; ordinary repair now fails before credential generation or remote mutation, while explicit `--rotate` creates replacement trust.
+- Repository gate: PASS for common, other, and Git diff checks.
+- Fresh evaluator: PASS. It found no plausible central broken-pass in the menu, VPN trust, progress visibility, or timer lifecycle; live Azure, packet transport, macOS OpenVPN client state, and VS Code UI remain acceptable operator-owned gaps.
+- Queue invalidation: not applicable because this repository has no `docs/features/status.json`.
