@@ -1,0 +1,1 @@
+Codex VM operator console proof failed: help omits retained command: telegram-to-agents

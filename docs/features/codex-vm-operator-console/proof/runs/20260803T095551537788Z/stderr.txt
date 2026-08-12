@@ -1,0 +1,1 @@
+Codex VM operator console proof failed: parser accepted removed command: shell

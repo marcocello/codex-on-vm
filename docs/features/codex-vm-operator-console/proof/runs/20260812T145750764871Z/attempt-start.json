@@ -1,0 +1,20 @@
+{
+  "capture_pid": 68372,
+  "command": [
+    "docs/features/codex-vm-operator-console/proof/run.sh"
+  ],
+  "cwd": "/Users/example/software/marcocello/codex-on-vm",
+  "runner_pgid": 68374,
+  "runner_pid": 68374,
+  "runtime": {
+    "capture_python": "3.13.3",
+    "capture_python_executable": "/usr/local/bin/python3",
+    "machine": "arm64",
+    "platform": "Darwin",
+    "platform_release": "25.5.0",
+    "shell": "/opt/homebrew/bin/zsh"
+  },
+  "started_at": "2026-08-12T14:57:50.765277+00:00",
+  "status": "STARTED",
+  "timeout_seconds": 180.0
+}

@@ -1,0 +1,8 @@
+Cloning into bare repository '/var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.CCxhfQ0xjo/telegram-to-agents/origin.git'...
+done.
+Everything up-to-date
+Cloning into '/var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.CCxhfQ0xjo/telegram-to-agents/home/projects/telegram-to-agents'...
+done.
+To /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.CCxhfQ0xjo/telegram-to-agents/origin.git
+   7951da8..1b2c8c5  main -> main
+Remote telegram-to-agents installation failed: clone has local worktree or index changes: /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.CCxhfQ0xjo/telegram-to-agents/home/projects/telegram-to-agents

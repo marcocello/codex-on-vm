@@ -1,0 +1,29 @@
+{
+  "capture_pid": 70530,
+  "cleanup": {
+    "kill_sent": false,
+    "status": "terminated",
+    "term_sent": true
+  },
+  "command": [
+    "docs/features/codex-vm-operator-console/proof/run.sh"
+  ],
+  "cwd": "/Users/example/software/marcocello/codex-on-vm",
+  "duration_seconds": 7.042056,
+  "ended_at": "2026-08-03T10:48:53.399405+00:00",
+  "returncode": 0,
+  "runner_pgid": 70532,
+  "runner_pid": 70532,
+  "runner_returncode": 0,
+  "runtime": {
+    "capture_python": "3.13.3",
+    "capture_python_executable": "/usr/local/bin/python3",
+    "machine": "arm64",
+    "platform": "Darwin",
+    "platform_release": "25.5.0",
+    "shell": "/opt/homebrew/bin/zsh"
+  },
+  "started_at": "2026-08-03T10:48:46.357288+00:00",
+  "status": "PASS",
+  "timeout_seconds": 90.0
+}

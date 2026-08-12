@@ -1,0 +1,1 @@
+Codex VM operator console proof failed: /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.AVi2vP44m5/menu-2.txt omits ordered output after line 0:     Terraform: read current VM target

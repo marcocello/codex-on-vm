@@ -1,0 +1,10 @@
+Cloning into bare repository '/var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.QWwvwJ9cqf/telegram-to-agents/origin.git'...
+done.
+Everything up-to-date
+Cloning into '/var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.QWwvwJ9cqf/telegram-to-agents/home/projects/telegram-to-agents'...
+done.
+To /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.QWwvwJ9cqf/telegram-to-agents/origin.git
+   746a61c..0005e27  main -> main
+From /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.QWwvwJ9cqf/telegram-to-agents/origin
+   746a61c..0005e27  main       -> origin/main
+Codex VM operator console proof failed: telegram-to-agents update did not restart an installed disabled service

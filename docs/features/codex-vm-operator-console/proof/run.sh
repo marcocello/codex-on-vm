@@ -31,7 +31,7 @@ command -v expect >/dev/null || fail "pseudo-terminal driver is unavailable"
 bash -n "$CONSOLE"
 "$CONSOLE" help >"$TMP/help.txt"
 
-for command in setup sign-in pair dot-codex vpn-setup menu help; do
+for command in setup sign-in pair dot-codex telegram-to-agents vpn-setup menu help; do
   rg -n "^  $command([[:space:]]|$)" "$TMP/help.txt" >/dev/null ||
     fail "help omits retained command: $command"
 done
@@ -65,6 +65,7 @@ if [[ " $* " == *" account show "* ]]; then
   exit 0
 fi
 if [[ " $* " == *" vm run-command invoke "* ]]; then
+  [[ " $* " == *"telegram_to_agents_prerequisites=1"* ]] || exit 89
   if [[ "${MENU_AZ_DELAY_SECONDS:-0}" != "0" ]]; then
     sleep "$MENU_AZ_DELAY_SECONDS"
   fi
@@ -79,7 +80,7 @@ set -euo pipefail
 exit 0
 SH
 chmod +x "$MENU_FAKE_BIN/terraform" "$MENU_FAKE_BIN/az" "$MENU_FAKE_BIN/ssh"
-for helper in prepare-machine.sh codex-pair.sh dot-codex-bootstrap.sh openvpn-setup.sh; do
+for helper in prepare-machine.sh codex-pair.sh dot-codex-bootstrap.sh telegram-to-agents-bootstrap.sh openvpn-setup.sh; do
   cat >"$MENU_FAKE_HELPERS/$helper" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -97,7 +98,7 @@ SH
   chmod +x "$MENU_FAKE_HELPERS/$helper"
 done
 
-for selection in 1 2 3 4 5; do
+for selection in 1 2 3 4 5 6; do
   MENU_OUTPUT="$TMP/menu-$selection.txt"
   menu_az_delay_seconds=0
   if [[ "$selection" == "2" ]]; then
@@ -138,7 +139,8 @@ EXPECT
     2) expected_helper='codex-pair.sh sign-in' ;;
     3) expected_helper='codex-pair.sh pair' ;;
     4) expected_helper='dot-codex-bootstrap.sh' ;;
-    5) expected_helper='openvpn-setup.sh' ;;
+    5) expected_helper='telegram-to-agents-bootstrap.sh' ;;
+    6) expected_helper='openvpn-setup.sh' ;;
   esac
   [[ "$(<"$MENU_HELPER_LOG")" == "$expected_helper" ]] ||
     fail "menu option $selection mapped to $(<"$MENU_HELPER_LOG"), expected $expected_helper"
@@ -193,19 +195,20 @@ expected = [
     "  2) Sign in to Codex",
     "  3) Pair a device",
     "  4) Clone or update dot-codex from GitHub",
-    "  5) Repair OpenVPN",
+    "  5) Install or update telegram-to-agents",
+    "  6) Repair OpenVPN",
 ]
 if numbered != expected:
     raise SystemExit(f"menu numbered options differ: {numbered!r}")
 PY
-printf 'Menu fixture: exact options 1-5, exact mappings, visible helper output, then return\n'
+printf 'Menu fixture: exact options 1-6, exact mappings, visible helper output, then return\n'
 
 EXTRACTED="$TMP/extracted"
 CODEX_VM_TEST_MODE=1 "$CONSOLE" __extract-helpers "$EXTRACTED"
-expected_mac="prepare-machine.sh codex-pair.sh dot-codex-bootstrap.sh openvpn-setup.sh remote-control-recover.sh"
+expected_mac="prepare-machine.sh codex-pair.sh dot-codex-bootstrap.sh telegram-to-agents-bootstrap.sh openvpn-setup.sh remote-control-recover.sh"
 expected_vm="ensure-codex-remote-control.sh ensure-ssh-keys.sh fetch-verified-artifact.sh install-verified-codex.sh configure-codex-openvpn.sh prepare-codex-vm.sh prepare-persistent-codex-home.sh"
-[[ "$(find "$EXTRACTED/scripts" -type f -maxdepth 1 -name '*.sh' | wc -l | tr -d ' ')" == "5" ]] ||
-  fail "extracted Mac helper count is not five"
+[[ "$(find "$EXTRACTED/scripts" -type f -maxdepth 1 -name '*.sh' | wc -l | tr -d ' ')" == "6" ]] ||
+  fail "extracted Mac helper count is not six"
 [[ "$(find "$EXTRACTED/vm-scripts" -type f -maxdepth 1 -name '*.sh' | wc -l | tr -d ' ')" == "7" ]] ||
   fail "extracted VM payload count is not seven"
 for helper in $expected_mac; do
@@ -220,10 +223,224 @@ for removed in ssh-open.sh ssh-close.sh workspace-open.sh workspace-close.sh; do
   [[ ! -e "$EXTRACTED/scripts/$removed" ]] || fail "removed helper was extracted: $removed"
 done
 
+TTA_HELPER="$EXTRACTED/scripts/telegram-to-agents-bootstrap.sh"
+TTA_FIXTURE="$TMP/telegram-to-agents"
+TTA_ORIGIN="$TTA_FIXTURE/origin.git"
+TTA_SEED="$TTA_FIXTURE/seed"
+TTA_REMOTE_HOME="$TTA_FIXTURE/home"
+TTA_REMOTE_DIR="$TTA_REMOTE_HOME/projects/telegram-to-agents"
+TTA_REMOTE_BIN="$TTA_FIXTURE/remote-bin"
+TTA_FAKE_BIN="$TTA_FIXTURE/fake-bin"
+TTA_ACTION_LOG="$TTA_FIXTURE/actions.log"
+TTA_INSTALLED_MARKER="$TTA_FIXTURE/service-installed"
+TTA_SERVICE_MARKER="$TTA_FIXTURE/service-enabled"
+TTA_ACTIVE_MARKER="$TTA_FIXTURE/service-active"
+mkdir -p "$TTA_SEED" "$TTA_REMOTE_HOME" "$TTA_REMOTE_BIN" "$TTA_FAKE_BIN"
+: >"$TTA_ACTION_LOG"
+mkdir -p "$TTA_REMOTE_HOME/.codex" "$TTA_REMOTE_HOME/.claude"
+printf 'model = "native-codex"\n' >"$TTA_REMOTE_HOME/.codex/config.toml"
+printf '{"model":"native-claude"}\n' >"$TTA_REMOTE_HOME/.claude/settings.json"
+TTA_NATIVE_CONFIG_BEFORE="$(shasum -a 256 \
+  "$TTA_REMOTE_HOME/.codex/config.toml" \
+  "$TTA_REMOTE_HOME/.claude/settings.json")"
+rg -F 'https://github.com/marcocello/telegram-to-agents' "$TTA_HELPER" >/dev/null ||
+  fail "telegram-to-agents helper omits the authoritative default repository"
+rg -F '$HOME/projects/telegram-to-agents' "$TTA_HELPER" >/dev/null ||
+  fail "telegram-to-agents helper omits the persistent default clone path"
+git -C "$TTA_SEED" init -b main >/dev/null
+printf '.venv/\n' >"$TTA_SEED/.gitignore"
+git -C "$TTA_SEED" add .gitignore
+git -C "$TTA_SEED" -c user.name=Proof -c user.email=proof@example.invalid \
+  commit -m initial >/dev/null
+git clone --bare "$TTA_SEED" "$TTA_ORIGIN" >/dev/null
+git -C "$TTA_SEED" remote add origin "$TTA_ORIGIN"
+git -C "$TTA_SEED" push -u origin main >/dev/null
+
+cat >"$TTA_REMOTE_BIN/python3" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "-m" && "${2:-}" == "venv" && $# == 3 ]] || exit 91
+venv="$3"
+mkdir -p "$venv/bin"
+cat >"$venv/bin/python" <<'PYTHON'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "-m" && "${2:-}" == "pip" && "${3:-}" == "install" ]] || exit 92
+[[ "${4:-}" == "--upgrade" && "${5:-}" == "$TTA_EXPECTED_INSTALL_TARGET" && $# == 5 ]] || exit 96
+printf 'pip-install:%s\n' "${*:4}" >>"$TTA_ACTION_LOG"
+bin_dir="$(cd "$(dirname "$0")" && pwd)"
+cat >"$bin_dir/telegram-to-agents" <<'CLI'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  onboarding)
+    mkdir -p "$HOME/.telegram-to-agents/config"
+    printf '{}\n' >"$HOME/.telegram-to-agents/config/config.json"
+    : >"$TTA_INSTALLED_MARKER"
+    : >"$TTA_SERVICE_MARKER"
+    : >"$TTA_ACTIVE_MARKER"
+    printf 'onboarding\n' >>"$TTA_ACTION_LOG"
+    ;;
+  restart)
+    printf 'restart\n' >>"$TTA_ACTION_LOG"
+    if [[ "${TTA_RESTART_ACTIVATES:-1}" == "1" ]]; then
+      : >"$TTA_ACTIVE_MARKER"
+    fi
+    ;;
+  *) exit 93 ;;
+esac
+CLI
+chmod +x "$bin_dir/telegram-to-agents"
+PYTHON
+chmod +x "$venv/bin/python"
+SH
+cat >"$TTA_REMOTE_BIN/systemctl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case " $* " in
+  *' cat telegram-to-agents.service '*) [[ -f "$TTA_INSTALLED_MARKER" ]] ;;
+  *' is-enabled telegram-to-agents.service '*) [[ -f "$TTA_SERVICE_MARKER" ]] ;;
+  *' is-active telegram-to-agents.service '*) [[ -f "$TTA_ACTIVE_MARKER" ]] ;;
+  *) exit 94 ;;
+esac
+SH
+cat >"$TTA_FAKE_BIN/ssh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ " $* " == *' true '* ]]; then
+  exit 0
+fi
+if [[ " $* " == *' onboarding '* ]]; then
+  HOME="$TTA_REMOTE_HOME" PATH="$TTA_REMOTE_BIN:/usr/bin:/bin" \
+    TTA_ACTIVE_MARKER="$TTA_ACTIVE_MARKER" \
+    TTA_RESTART_ACTIVATES="${TTA_RESTART_ACTIVATES:-1}" \
+    "$TTA_REMOTE_HOME/.local/bin/telegram-to-agents" onboarding
+  exit 0
+fi
+if [[ " $* " == *' bash -s -- '* ]]; then
+  HOME="$TTA_REMOTE_HOME" PATH="$TTA_REMOTE_BIN:/usr/bin:/bin" \
+    TTA_ACTION_LOG="$TTA_ACTION_LOG" \
+    TTA_INSTALLED_MARKER="$TTA_INSTALLED_MARKER" \
+    TTA_SERVICE_MARKER="$TTA_SERVICE_MARKER" \
+    TTA_ACTIVE_MARKER="$TTA_ACTIVE_MARKER" \
+    TTA_EXPECTED_INSTALL_TARGET="$TTA_REMOTE_DIR" \
+    TTA_RESTART_ACTIVATES="${TTA_RESTART_ACTIVATES:-1}" \
+    bash -s -- "$TTA_ORIGIN" "$TTA_REMOTE_DIR"
+  exit 0
+fi
+exit 95
+SH
+chmod +x "$TTA_REMOTE_BIN/python3" "$TTA_REMOTE_BIN/systemctl" "$TTA_FAKE_BIN/ssh"
+
+run_tta_helper() {
+  PATH="$TTA_FAKE_BIN:$PATH" \
+  CODEX_VM_VPN_SSH_ALIAS=proof-vm \
+  TELEGRAM_TO_AGENTS_REPOSITORY_URL="$TTA_ORIGIN" \
+  TELEGRAM_TO_AGENTS_REMOTE_DIR="$TTA_REMOTE_DIR" \
+  TTA_REMOTE_HOME="$TTA_REMOTE_HOME" \
+  TTA_REMOTE_DIR="$TTA_REMOTE_DIR" \
+  TTA_REMOTE_BIN="$TTA_REMOTE_BIN" \
+  TTA_ORIGIN="$TTA_ORIGIN" \
+  TTA_ACTION_LOG="$TTA_ACTION_LOG" \
+  TTA_INSTALLED_MARKER="$TTA_INSTALLED_MARKER" \
+  TTA_SERVICE_MARKER="$TTA_SERVICE_MARKER" \
+  TTA_ACTIVE_MARKER="$TTA_ACTIVE_MARKER" \
+  TTA_EXPECTED_INSTALL_TARGET="$TTA_REMOTE_DIR" \
+  TTA_RESTART_ACTIVATES="${TTA_RESTART_ACTIVATES:-1}" \
+  "$TTA_HELPER"
+}
+
+run_tta_helper
+[[ "$(git -C "$TTA_REMOTE_DIR" remote get-url origin)" == "$TTA_ORIGIN" ]] ||
+  fail "telegram-to-agents first install used the wrong origin"
+[[ -L "$TTA_REMOTE_HOME/.local/bin/telegram-to-agents" ]] ||
+  fail "telegram-to-agents CLI link was not created"
+[[ "$(readlink "$TTA_REMOTE_HOME/.local/bin/telegram-to-agents")" == \
+  "$TTA_REMOTE_DIR/.venv/bin/telegram-to-agents" ]] ||
+  fail "telegram-to-agents CLI link does not target the checkout virtual environment"
+rg -F "pip-install:--upgrade $TTA_REMOTE_DIR" "$TTA_ACTION_LOG" >/dev/null ||
+  fail "telegram-to-agents did not install the checked-out repository"
+[[ "$(rg -c '^onboarding$' "$TTA_ACTION_LOG")" == "1" ]] ||
+  fail "telegram-to-agents first install did not onboard exactly once"
+
+printf 'updated\n' >"$TTA_SEED/version.txt"
+git -C "$TTA_SEED" add version.txt
+git -C "$TTA_SEED" -c user.name=Proof -c user.email=proof@example.invalid \
+  commit -m update >/dev/null
+git -C "$TTA_SEED" push origin main >/dev/null
+rm -f "$TTA_ACTIVE_MARKER"
+run_tta_helper
+[[ "$(<"$TTA_REMOTE_DIR/version.txt")" == "updated" ]] ||
+  fail "telegram-to-agents update did not fast-forward"
+[[ "$(rg -c '^onboarding$' "$TTA_ACTION_LOG")" == "1" ]] ||
+  fail "telegram-to-agents update repeated onboarding"
+[[ "$(rg -c '^restart$' "$TTA_ACTION_LOG")" == "1" ]] ||
+  fail "telegram-to-agents update did not restart the installed service"
+[[ -f "$TTA_ACTIVE_MARKER" ]] ||
+  fail "telegram-to-agents update did not activate the installed service"
+[[ "$(shasum -a 256 \
+  "$TTA_REMOTE_HOME/.codex/config.toml" \
+  "$TTA_REMOTE_HOME/.claude/settings.json")" == "$TTA_NATIVE_CONFIG_BEFORE" ]] ||
+  fail "telegram-to-agents action changed native Codex or Claude configuration"
+
+rm -f "$TTA_SERVICE_MARKER" "$TTA_ACTIVE_MARKER"
+run_tta_helper
+[[ "$(rg -c '^restart$' "$TTA_ACTION_LOG")" == "2" ]] ||
+  fail "telegram-to-agents update did not restart an installed disabled service"
+[[ -f "$TTA_ACTIVE_MARKER" ]] ||
+  fail "telegram-to-agents update did not activate an installed disabled service"
+
+rm -f "$TTA_ACTIVE_MARKER"
+if TTA_RESTART_ACTIVATES=0 run_tta_helper >"$TMP/tta-inactive.txt" 2>&1; then
+  fail "telegram-to-agents update succeeded while its service stayed inactive"
+fi
+[[ ! -f "$TTA_ACTIVE_MARKER" ]] ||
+  fail "telegram-to-agents inactive-service fixture activated unexpectedly"
+
+touch "$TTA_REMOTE_DIR/dirty.txt"
+if run_tta_helper >"$TMP/tta-dirty.txt" 2>&1; then
+  fail "telegram-to-agents update accepted a dirty checkout"
+fi
+rm "$TTA_REMOTE_DIR/dirty.txt"
+git -C "$TTA_REMOTE_DIR" remote set-url origin "$TTA_FIXTURE/wrong.git"
+if run_tta_helper >"$TMP/tta-wrong-origin.txt" 2>&1; then
+  fail "telegram-to-agents update accepted the wrong origin"
+fi
+git -C "$TTA_REMOTE_DIR" remote set-url origin "$TTA_ORIGIN"
+git -C "$TTA_REMOTE_DIR" checkout --detach >/dev/null
+if run_tta_helper >"$TMP/tta-detached.txt" 2>&1; then
+  fail "telegram-to-agents update accepted a detached checkout"
+fi
+git -C "$TTA_REMOTE_DIR" checkout main >/dev/null
+
+printf 'ahead\n' >"$TTA_REMOTE_DIR/ahead.txt"
+git -C "$TTA_REMOTE_DIR" add ahead.txt
+git -C "$TTA_REMOTE_DIR" -c user.name=Proof -c user.email=proof@example.invalid \
+  commit -m ahead >/dev/null
+if run_tta_helper >"$TMP/tta-ahead.txt" 2>&1; then
+  fail "telegram-to-agents update accepted a local-ahead checkout"
+fi
+git -C "$TTA_REMOTE_DIR" push origin main >/dev/null
+git -C "$TTA_SEED" pull --ff-only origin main >/dev/null
+
+printf 'local\n' >"$TTA_REMOTE_DIR/local.txt"
+git -C "$TTA_REMOTE_DIR" add local.txt
+git -C "$TTA_REMOTE_DIR" -c user.name=Proof -c user.email=proof@example.invalid \
+  commit -m local >/dev/null
+printf 'remote\n' >"$TTA_SEED/remote.txt"
+git -C "$TTA_SEED" add remote.txt
+git -C "$TTA_SEED" -c user.name=Proof -c user.email=proof@example.invalid \
+  commit -m remote >/dev/null
+git -C "$TTA_SEED" push origin main >/dev/null
+if run_tta_helper >"$TMP/tta-diverged.txt" 2>&1; then
+  fail "telegram-to-agents update accepted a divergent checkout"
+fi
+printf 'telegram-to-agents fixture: clone, install, onboarding, fast-forward, restart, and safety rejection passed.\n'
+
 "$ROOT/docs/features/self-hosted-openvpn-access/proof/openvpn-scenario.sh" \
   "$EXTRACTED" "$TMP/operator-openvpn"
 
-for command in sign-in pair dot-codex vpn-setup; do
+for command in sign-in pair dot-codex telegram-to-agents vpn-setup; do
   "$CONSOLE" --dry-run "$command" >"$TMP/dry-$command.txt"
   assert_patterns_in_order \
     "$TMP/dry-$command.txt" \
@@ -266,6 +483,7 @@ if [[ " $* " == *" account show "* ]]; then
   exit 0
 fi
 if [[ " $* " == *" vm run-command invoke "* ]]; then
+  [[ " $* " == *"telegram_to_agents_prerequisites=1"* ]] || exit 89
   printf '%s\n' '{"value":[{"message":"CODEX_ON_VM_PREPARED=1"}]}'
   exit 0
 fi
@@ -277,7 +495,7 @@ set -euo pipefail
 exit 23
 SH
 chmod +x "$FAKE_BIN/terraform" "$FAKE_BIN/az" "$FAKE_BIN/ssh"
-for helper in codex-pair.sh dot-codex-bootstrap.sh openvpn-setup.sh; do
+for helper in codex-pair.sh dot-codex-bootstrap.sh telegram-to-agents-bootstrap.sh openvpn-setup.sh; do
   cat >"$FAKE_HELPERS/$helper" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -286,7 +504,7 @@ SH
   chmod +x "$FAKE_HELPERS/$helper"
 done
 
-for command in sign-in pair dot-codex vpn-setup; do
+for command in sign-in pair dot-codex telegram-to-agents vpn-setup; do
   : >"$HELPER_CALL_LOG"
   if PATH="$FAKE_BIN:$PATH" \
     CODEX_VM_TEST_MODE=1 \
@@ -306,12 +524,12 @@ for command in sign-in pair dot-codex vpn-setup; do
     fail "$command did not provide import/connect guidance"
   [[ ! -s "$HELPER_CALL_LOG" ]] || fail "$command invoked its action helper while disconnected"
 done
-printf 'Disconnected fixture: options 2-5 stop visibly before helper activation\n'
+printf 'Disconnected fixture: options 2-6 stop visibly before helper activation\n'
 
 if "$CONSOLE" --dry-run vpn-setup --bad >"$TMP/bad-vpn.txt" 2>&1; then
   fail "vpn-setup accepted an unexpected option"
 fi
-for command in setup sign-in pair dot-codex menu; do
+for command in setup sign-in pair dot-codex telegram-to-agents menu; do
   if "$CONSOLE" --dry-run "$command" unexpected >"$TMP/bad-$command.txt" 2>&1; then
     fail "$command accepted an unexpected argument"
   fi

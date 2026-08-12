@@ -1,0 +1,72 @@
+Cloning into bare repository '/var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/telegram-to-agents/origin.git'...
+done.
+Everything up-to-date
+Cloning into '/var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/telegram-to-agents/home/projects/telegram-to-agents'...
+done.
+To /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/telegram-to-agents/origin.git
+   383a0f7..19dae86  main -> main
+From /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/telegram-to-agents/origin
+   383a0f7..19dae86  main       -> origin/main
+HEAD is now at 19dae86 update
+Switched to branch 'main'
+To /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/telegram-to-agents/origin.git
+   19dae86..fbf99aa  main -> main
+From /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/telegram-to-agents/origin
+ * branch            main       -> FETCH_HEAD
+   19dae86..fbf99aa  main       -> origin/main
+To /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/telegram-to-agents/origin.git
+   fbf99aa..2391f27  main -> main
+OpenVPN setup output (bounded tail):
+OpenVPN setup failed: existing OpenVPN trust is missing at /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/operator-openvpn/openvpn-scenario/mac/openvpn; restore it or run scripts/codex-vm.sh vpn-setup --rotate to intentionally create replacement trust
+OPENVPN_SERVER_READY=1
+OpenVPN server and Mac profile were reconciled over the connected VPN.
+  Profile: /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/operator-openvpn/openvpn-scenario/mac/openvpn/codex-on-vm.ovpn
+  SSH after connecting: ssh codex-on-vm-vpn
+OPENVPN_SERVER_READY=1
+OpenVPN server and Mac profile were reconciled over the connected VPN.
+  Profile: /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/operator-openvpn/openvpn-scenario/mac/openvpn/codex-on-vm.ovpn
+  SSH after connecting: ssh codex-on-vm-vpn
+OPENVPN_SERVER_READY=1
+OpenVPN server and Mac profile were reconciled over the connected VPN.
+  Profile: /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/operator-openvpn/openvpn-scenario/mac/openvpn/codex-on-vm.ovpn
+  SSH after connecting: ssh codex-on-vm-vpn
+  Previous credentials: /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/operator-openvpn/openvpn-scenario/mac/openvpn.backup-20260812T151003Z-91861
+OPENVPN_SERVER_READY=1
+OpenVPN setup recovery: the replacement is active remotely; keeping the matching local credentials.
+OpenVPN setup output (bounded tail):
+OpenVPN setup failed: existing OpenVPN trust is missing at /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/operator-openvpn/openvpn-scenario/mac/openvpn; restore it or run scripts/codex-vm.sh vpn-setup --rotate to intentionally create replacement trust
+OPENVPN_SERVER_READY=1
+OpenVPN server and Mac profile were reconciled over the connected VPN.
+  Profile: /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/operator-openvpn/openvpn-scenario/mac/openvpn/codex-on-vm.ovpn
+  SSH after connecting: ssh codex-on-vm-vpn
+OPENVPN_SERVER_READY=1
+OpenVPN server and Mac profile were reconciled over the connected VPN.
+  Profile: /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/operator-openvpn/openvpn-scenario/mac/openvpn/codex-on-vm.ovpn
+  SSH after connecting: ssh codex-on-vm-vpn
+OPENVPN_SERVER_READY=1
+OpenVPN server and Mac profile were reconciled over the connected VPN.
+  Profile: /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/operator-openvpn/openvpn-scenario/mac/openvpn/codex-on-vm.ovpn
+  SSH after connecting: ssh codex-on-vm-vpn
+  Previous credentials: /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/operator-openvpn/openvpn-scenario/mac/openvpn.backup-20260812T151003Z-91861
+OPENVPN_SERVER_READY=1
+OpenVPN setup recovery: the replacement is active remotely; keeping the matching local credentials.
+OpenVPN VM configuration failed: OpenVPN replacement did not become active; previous configuration was restored
+OpenVPN setup output (bounded tail):
+OpenVPN setup failed: existing OpenVPN trust is missing at /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/operator-openvpn/openvpn-scenario/mac/openvpn; restore it or run scripts/codex-vm.sh vpn-setup --rotate to intentionally create replacement trust
+OPENVPN_SERVER_READY=1
+OpenVPN server and Mac profile were reconciled over the connected VPN.
+  Profile: /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/operator-openvpn/openvpn-scenario/mac/openvpn/codex-on-vm.ovpn
+  SSH after connecting: ssh codex-on-vm-vpn
+OPENVPN_SERVER_READY=1
+OpenVPN server and Mac profile were reconciled over the connected VPN.
+  Profile: /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/operator-openvpn/openvpn-scenario/mac/openvpn/codex-on-vm.ovpn
+  SSH after connecting: ssh codex-on-vm-vpn
+OPENVPN_SERVER_READY=1
+OpenVPN server and Mac profile were reconciled over the connected VPN.
+  Profile: /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/operator-openvpn/openvpn-scenario/mac/openvpn/codex-on-vm.ovpn
+  SSH after connecting: ssh codex-on-vm-vpn
+  Previous credentials: /var/folders/nf/8g90cw3d5pv1smp4vpxnvh4w0000gn/T/tmp.q9dwXKXqKb/operator-openvpn/openvpn-scenario/mac/openvpn.backup-20260812T151003Z-91861
+OPENVPN_SERVER_READY=1
+OpenVPN setup recovery: the replacement is active remotely; keeping the matching local credentials.
+OpenVPN VM configuration failed: OpenVPN replacement did not become active; previous configuration was restored
+OpenVPN setup failed: OpenVPN is not connected; connect the Mac OpenVPN client and retry
