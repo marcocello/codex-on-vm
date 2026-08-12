@@ -62,6 +62,7 @@ Or run a workflow directly:
 | Sign in to Codex | `scripts/codex-vm.sh sign-in` |
 | Pair another device | `scripts/codex-vm.sh pair` |
 | Clone or update dot-codex | `scripts/codex-vm.sh dot-codex` |
+| Install or update telegram-to-agents | `scripts/codex-vm.sh telegram-to-agents` |
 | Repair private OpenVPN access | `scripts/codex-vm.sh vpn-setup` |
 
 If Codex or Remote Control stops working, run:

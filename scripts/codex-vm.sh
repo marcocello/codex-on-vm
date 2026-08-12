@@ -142,6 +142,7 @@ materialize_helpers() {
     prepare-machine.sh \
     codex-pair.sh \
     dot-codex-bootstrap.sh \
+    telegram-to-agents-bootstrap.sh \
     openvpn-setup.sh \
     remote-control-recover.sh; do
     extract_embedded_helper "$helper" "$target/scripts/$helper"
@@ -197,6 +198,7 @@ run_helper() {
     prepare-machine.sh) ;;
     codex-pair.sh) ;;
     dot-codex-bootstrap.sh) ;;
+    telegram-to-agents-bootstrap.sh) ;;
     openvpn-setup.sh) ;;
     remote-control-recover.sh) ;;
     *) fail "unknown embedded helper: $helper" ;;
@@ -254,6 +256,7 @@ Commands:
   sign-in                   Sign in to Codex
   pair                      Pair a device with the signed-in Codex account
   dot-codex                 Clone or update dot-codex from GitHub
+  telegram-to-agents        Install or update telegram-to-agents on the VM
   vpn-setup [--rotate]      Repair or intentionally rotate private OpenVPN access
   menu                      Open the interactive menu
   help                      Show this help
@@ -267,9 +270,10 @@ Examples:
   scripts/codex-vm.sh sign-in
   scripts/codex-vm.sh pair
   scripts/codex-vm.sh dot-codex
+  scripts/codex-vm.sh telegram-to-agents
   scripts/codex-vm.sh vpn-setup
 
-Connect the Mac OpenVPN client before sign-in, pairing, dot-codex, or VPN maintenance.
+Connect the Mac OpenVPN client before sign-in, pairing, dot-codex, telegram-to-agents, or VPN maintenance.
 If preparation is required, interactive commands ask before running setup.
 Non-interactive commands stop and instruct you to run setup explicitly.
 EOF
@@ -407,11 +411,13 @@ import shlex
 
 version = shlex.quote(f"codex_version={os.environ['CODEX_VERSION']}")
 mount = shlex.quote(f"workspace_mount={os.environ['WORKSPACE_MOUNT']}")
+telegram = shlex.quote("telegram_to_agents_prerequisites=1")
 print("marker=/var/lib/codex-on-vm/prepared")
 print(
     'if test -r "$marker"'
     f" && grep -Fqx -- {version} \"$marker\""
-    f" && grep -Fqx -- {mount} \"$marker\"; then"
+    f" && grep -Fqx -- {mount} \"$marker\""
+    f" && grep -Fqx -- {telegram} \"$marker\"; then"
 )
 print("  printf 'CODEX_ON_VM_PREPARED=1\\n'")
 print("fi")
@@ -541,7 +547,8 @@ show_menu() {
   printf '  2) Sign in to Codex\n'
   printf '  3) Pair a device\n'
   printf '  4) Clone or update dot-codex from GitHub\n'
-  printf '  5) Repair OpenVPN\n\n'
+  printf '  5) Install or update telegram-to-agents\n'
+  printf '  6) Repair OpenVPN\n\n'
   printf 'Choose an action: '
   IFS= read -r choice </dev/tty || return 0
   case "$choice" in
@@ -549,8 +556,9 @@ show_menu() {
     2) action=sign-in ;;
     3) action=pair ;;
     4) action=dot-codex ;;
-    5) action=vpn-setup ;;
-    *) fail "unknown menu selection '$choice'; choose 1, 2, 3, 4, or 5" ;;
+    5) action=telegram-to-agents ;;
+    6) action=vpn-setup ;;
+    *) fail "unknown menu selection '$choice'; choose 1, 2, 3, 4, 5, or 6" ;;
   esac
 
   dispatch "$action"
@@ -565,7 +573,7 @@ dispatch() {
       print_usage
       return 0
       ;;
-    setup | sign-in | pair | dot-codex | vpn-setup | menu)
+    setup | sign-in | pair | dot-codex | telegram-to-agents | vpn-setup | menu)
       ;;
     *) fail "unknown command '$command_name'; run scripts/codex-vm.sh help" ;;
   esac
@@ -576,6 +584,7 @@ dispatch() {
     sign-in) account_action sign-in "Sign in to Codex" "$@" ;;
     pair) account_action pair "Pair a device" "$@" ;;
     dot-codex) delegate_prepared_no_args "Clone or update dot-codex from GitHub" dot-codex-bootstrap.sh "$@" ;;
+    telegram-to-agents) delegate_prepared_no_args "Install or update telegram-to-agents" telegram-to-agents-bootstrap.sh "$@" ;;
     vpn-setup) openvpn_setup "$@" ;;
     menu) show_menu "$@" ;;
   esac
@@ -1299,6 +1308,153 @@ printf '  Symlink: \$HOME/.codex -> %s\n' "${REMOTE_DIR:-\$HOME/projects/dot-cod
 printf '  SSH: VPN-only\n'
 printf '  Remote Control: connected\n'
 __CODEX_VM_HELPER_END__ dot-codex-bootstrap.sh
+
+__CODEX_VM_HELPER_BEGIN__ telegram-to-agents-bootstrap.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+SSH_ALIAS="${CODEX_VM_VPN_SSH_ALIAS:-codex-on-vm-vpn}"
+REPOSITORY_URL="${TELEGRAM_TO_AGENTS_REPOSITORY_URL:-https://github.com/marcocello/telegram-to-agents}"
+REMOTE_DIR="${TELEGRAM_TO_AGENTS_REMOTE_DIR:-}"
+
+fail() {
+  printf 'telegram-to-agents installation failed: %s\n' "$1" >&2
+  exit 1
+}
+
+note() {
+  printf '  - %s\n' "$1"
+}
+
+[[ $# -eq 0 ]] || fail "this command accepts no positional arguments"
+[[ "$(uname -s)" == "Darwin" ]] || fail "this helper is for macOS"
+[[ -n "$REPOSITORY_URL" ]] || fail "TELEGRAM_TO_AGENTS_REPOSITORY_URL must not be empty"
+[[ "$REPOSITORY_URL" != *$'\n'* && "$REPOSITORY_URL" != *$'\r'* && "$REPOSITORY_URL" != *$'\t'* ]] ||
+  fail "repository URL must not contain control characters"
+[[ -n "$SSH_ALIAS" && "$SSH_ALIAS" != -* ]] || fail "CODEX_VM_VPN_SSH_ALIAS is invalid"
+[[ "$SSH_ALIAS" != *$'\n'* && "$SSH_ALIAS" != *$'\r'* && "$SSH_ALIAS" != *$'\t'* && "$SSH_ALIAS" != *' '* ]] ||
+  fail "SSH alias must not contain whitespace"
+if [[ -n "$REMOTE_DIR" ]]; then
+  [[ "$REMOTE_DIR" == /* ]] || fail "TELEGRAM_TO_AGENTS_REMOTE_DIR must be an absolute remote path"
+  [[ "$REMOTE_DIR" != *$'\n'* && "$REMOTE_DIR" != *$'\r'* && "$REMOTE_DIR" != *$'\t'* ]] ||
+    fail "remote path must not contain control characters"
+fi
+command -v ssh >/dev/null || fail "missing required command: ssh"
+
+note "Repository: $REPOSITORY_URL"
+note "VM SSH alias: $SSH_ALIAS"
+note "Remote clone: ${REMOTE_DIR:-\$HOME/projects/telegram-to-agents}"
+
+ssh -o BatchMode=yes -o ConnectTimeout=5 "$SSH_ALIAS" true >/dev/null 2>&1 ||
+  fail "OpenVPN is not connected; connect the Mac OpenVPN client and retry"
+
+printf -v REMOTE_COMMAND 'bash -s -- %q %q' "$REPOSITORY_URL" "$REMOTE_DIR"
+REMOTE_OUTPUT=""
+REMOTE_STATUS=0
+REMOTE_OUTPUT="$(ssh "$SSH_ALIAS" "$REMOTE_COMMAND" <<'REMOTE_SCRIPT'
+set -euo pipefail
+
+REPOSITORY_URL="$1"
+REMOTE_DIR_OVERRIDE="$2"
+CHECKOUT="${REMOTE_DIR_OVERRIDE:-$HOME/projects/telegram-to-agents}"
+VENV="$CHECKOUT/.venv"
+CLI="$VENV/bin/telegram-to-agents"
+CLI_LINK="$HOME/.local/bin/telegram-to-agents"
+CONFIG="$HOME/.telegram-to-agents/config/config.json"
+SERVICE="telegram-to-agents.service"
+
+fail() {
+  printf 'Remote telegram-to-agents installation failed: %s\n' "$1" >&2
+  exit 1
+}
+
+remote_note() {
+  printf '  [remote] %s\n' "$1"
+}
+
+for command in git python3 readlink systemctl; do
+  command -v "$command" >/dev/null || fail "missing required command: $command"
+done
+[[ "$CHECKOUT" == /* ]] || fail "remote clone path must be absolute"
+
+if [[ -e "$CHECKOUT" || -L "$CHECKOUT" ]]; then
+  remote_note "Inspecting existing checkout at $CHECKOUT."
+  [[ -d "$CHECKOUT" && ! -L "$CHECKOUT" ]] ||
+    fail "clone target exists but is not a real directory: $CHECKOUT"
+  [[ "$(git -C "$CHECKOUT" rev-parse --is-inside-work-tree 2>/dev/null)" == "true" ]] ||
+    fail "clone target is not a Git worktree: $CHECKOUT"
+  CLONE_ROOT="$(git -C "$CHECKOUT" rev-parse --show-toplevel)"
+  [[ "$(readlink -f "$CLONE_ROOT")" == "$(readlink -f "$CHECKOUT")" ]] ||
+    fail "clone target is nested inside a different Git worktree: $CHECKOUT"
+  ACTUAL_ORIGIN="$(git -C "$CHECKOUT" remote get-url origin 2>/dev/null)" ||
+    fail "clone target has no origin remote"
+  [[ "$ACTUAL_ORIGIN" == "$REPOSITORY_URL" ]] ||
+    fail "clone origin is $ACTUAL_ORIGIN, expected $REPOSITORY_URL"
+  [[ -z "$(git -C "$CHECKOUT" status --porcelain --untracked-files=normal)" ]] ||
+    fail "clone has local worktree or index changes: $CHECKOUT"
+  CURRENT_BRANCH="$(git -C "$CHECKOUT" symbolic-ref --quiet --short HEAD)" ||
+    fail "clone is detached"
+  UPSTREAM="$(git -C "$CHECKOUT" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" ||
+    fail "branch $CURRENT_BRANCH has no upstream"
+  [[ "$UPSTREAM" == origin/* ]] || fail "branch $CURRENT_BRANCH does not track origin"
+  remote_note "Fetching and fast-forwarding $CURRENT_BRANCH from $UPSTREAM."
+  git -C "$CHECKOUT" fetch --prune origin
+  git -C "$CHECKOUT" merge-base --is-ancestor HEAD "$UPSTREAM" ||
+    fail "branch $CURRENT_BRANCH contains local commits or has diverged from $UPSTREAM"
+  git -C "$CHECKOUT" merge --ff-only "$UPSTREAM" ||
+    fail "branch $CURRENT_BRANCH has diverged from $UPSTREAM; resolve it manually"
+else
+  remote_note "Cloning $REPOSITORY_URL into $CHECKOUT."
+  mkdir -p "$(dirname "$CHECKOUT")"
+  git clone -- "$REPOSITORY_URL" "$CHECKOUT"
+fi
+
+remote_note "Creating or refreshing the checkout virtual environment."
+python3 -m venv "$VENV"
+"$VENV/bin/python" -m pip install --upgrade "$CHECKOUT"
+[[ -x "$CLI" ]] || fail "installed CLI is missing at $CLI"
+
+mkdir -p "$(dirname "$CLI_LINK")"
+if [[ -e "$CLI_LINK" || -L "$CLI_LINK" ]]; then
+  [[ -L "$CLI_LINK" && "$(readlink -f "$CLI_LINK")" == "$(readlink -f "$CLI")" ]] ||
+    fail "CLI path exists and does not point to this checkout: $CLI_LINK"
+else
+  ln -s -- "$CLI" "$CLI_LINK"
+fi
+
+if [[ ! -f "$CONFIG" ]]; then
+  remote_note "Current configuration is missing; interactive onboarding is required."
+  printf 'TELEGRAM_TO_AGENTS_ONBOARDING_REQUIRED=1\n'
+  exit 0
+fi
+
+if systemctl --user cat "$SERVICE" >/dev/null 2>&1; then
+  remote_note "Restarting the existing telegram-to-agents service."
+  "$CLI" restart
+  systemctl --user is-active "$SERVICE" >/dev/null 2>&1 ||
+    fail "$SERVICE is not active after restart"
+  remote_note "$SERVICE is active."
+else
+  remote_note "Package updated; no installed telegram-to-agents user service was found."
+fi
+
+printf 'Remote telegram-to-agents installation is ready at %s.\n' "$CHECKOUT"
+REMOTE_SCRIPT
+)" || REMOTE_STATUS=$?
+printf '%s\n' "$REMOTE_OUTPUT"
+[[ "$REMOTE_STATUS" == "0" ]] || exit "$REMOTE_STATUS"
+
+if grep -Fx 'TELEGRAM_TO_AGENTS_ONBOARDING_REQUIRED=1' <<<"$REMOTE_OUTPUT" >/dev/null; then
+  note "Starting interactive telegram-to-agents onboarding on the VM."
+  ssh -t "$SSH_ALIAS" '$HOME/.local/bin/telegram-to-agents onboarding' ||
+    fail "interactive onboarding did not complete"
+fi
+
+printf 'telegram-to-agents installation/update completed successfully.\n'
+printf '  Clone: %s\n' "${REMOTE_DIR:-\$HOME/projects/telegram-to-agents}"
+printf '  CLI: \$HOME/.local/bin/telegram-to-agents\n'
+printf '  SSH: VPN-only\n'
+__CODEX_VM_HELPER_END__ telegram-to-agents-bootstrap.sh
 
 __CODEX_VM_HELPER_BEGIN__ openvpn-setup.sh
 #!/usr/bin/env bash
@@ -2572,6 +2728,7 @@ install_packages() {
         jq \
         openvpn \
         parted \
+        python3-venv \
         unattended-upgrades; then
       return
     fi
@@ -2822,7 +2979,8 @@ finish_preparation() {
 
   marker="$(root_path /var/lib/codex-on-vm/prepared)"
   install -d -m 0755 "$(dirname "$marker")"
-  printf 'codex_version=%s\nworkspace_mount=%s\n' "$CODEX_VERSION" "$MOUNT_PATH" >"$marker"
+  printf 'codex_version=%s\nworkspace_mount=%s\ntelegram_to_agents_prerequisites=1\n' \
+    "$CODEX_VERSION" "$MOUNT_PATH" >"$marker"
 
   host_key_file="$(root_path /etc/ssh/ssh_host_ed25519_key.pub)"
   [[ -f "$host_key_file" ]] || ssh-keygen -A

@@ -66,7 +66,7 @@ scripts/codex-vm.sh --dry-run setup
 
 Before a dependent interactive workflow, the console checks whether the VM is prepared and asks before running setup when needed. A non-interactive workflow stops and tells the operator to run setup. A failed setup blocks the requested action.
 
-## Account, pairing, and dot-codex
+## Account, pairing, dot-codex, and telegram-to-agents
 
 Connect the existing OpenVPN profile on the Mac before using an interactive workflow. Then sign in:
 
@@ -91,6 +91,14 @@ scripts/codex-vm.sh dot-codex
 ```
 
 The default checkout is `/home/azureadmin/projects/dot-codex`. The workflow redirects `~/.codex` to this persistent checkout without moving active state back to the OS disk.
+
+Install or safely update telegram-to-agents:
+
+```bash
+scripts/codex-vm.sh telegram-to-agents
+```
+
+The default checkout is `/home/azureadmin/projects/telegram-to-agents`. The workflow creates a checkout-local virtual environment, publishes `~/.local/bin/telegram-to-agents`, runs onboarding on first installation, and restarts an existing `telegram-to-agents.service` after an update. It refuses dirty, wrong-origin, detached, or divergent checkouts.
 
 ## Private OpenVPN and VS Code
 
@@ -159,7 +167,7 @@ Open `/home/azureadmin/projects` through VS Code Remote-SSH using `codex-on-vm-v
 
 ## Access model
 
-There is no inbound TCP/22 rule, temporary rule, or SSHFS fallback. `sign-in`, `pair`, `dot-codex`, and `vpn-setup` visibly fail before remote mutation when `codex-on-vm-vpn` is unreachable. The console does not connect or disconnect the Mac OpenVPN client.
+There is no inbound TCP/22 rule, temporary rule, or SSHFS fallback. `sign-in`, `pair`, `dot-codex`, `telegram-to-agents`, and `vpn-setup` visibly fail before remote mutation when `codex-on-vm-vpn` is unreachable. The console does not connect or disconnect the Mac OpenVPN client.
 
 Never commit Terraform state, `terraform.tfvars`, `backend.hcl`, private keys, pairing codes, or credentials.
 
