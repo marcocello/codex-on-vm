@@ -1,9 +1,0 @@
-Bash: /bin/bash | GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)
-Console: /Users/example/software/marcocello/codex-on-vm/scripts/codex-vm.sh
-Proof mode: production parser, pseudo-terminal menu, visible checks, fake disconnected VPN, and embedded extraction
-Menu fixture: exact options 1-5, exact mappings, visible helper output, then return
-OPENVPN_SERVER_READY=1
-OpenVPN fixture: VPN-only transport, real certificates, persistence, idempotency, rotation, rollback, and disconnected fail-closed behavior
-Dry-run fixture: preparation, VPN, activation, and result are visible in order
-Disconnected fixture: options 2-5 stop visibly before helper activation
-Codex VM operator console proof passed.
