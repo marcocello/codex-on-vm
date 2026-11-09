@@ -638,4 +638,35 @@ if rg -F 'network nsg rule' "$CALL_LOG" >/dev/null || rg -F 'remote-control star
   fail "disconnected pairing crossed a mutation edge"
 fi
 
+MEM_SAMPLE="$FAKE_REMOTE_ROOT/usr/local/sbin/codex-vm-memory-sample"
+MEM_TIMER="$FAKE_REMOTE_ROOT/etc/systemd/system/codex-vm-memory-sample.timer"
+[[ -x "$MEM_SAMPLE" && -f "$MEM_TIMER" ]] || fail "memory monitor was not installed"
+rg -F 'OnUnitActiveSec=1min' "$MEM_TIMER" >/dev/null || fail "memory sampling interval is missing"
+MEM_TEST="$FIXTURE/memory-sample-test"
+mkdir -p "$MEM_TEST/bin" "$MEM_TEST/proc/pressure"
+sed "s|/proc/meminfo|$MEM_TEST/proc/meminfo|g; s|/proc/pressure/memory|$MEM_TEST/proc/pressure/memory|g" "$MEM_SAMPLE" >"$MEM_TEST/sample"
+cat >"$MEM_TEST/bin/logger" <<'LOGGER'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"$MEM_SAMPLE_OUTPUT"
+LOGGER
+chmod +x "$MEM_TEST/bin/logger"
+export MEM_SAMPLE_OUTPUT="$MEM_TEST/output"
+cat >"$MEM_TEST/proc/meminfo" <<'MEMINFO'
+MemTotal: 4000000 kB
+MemAvailable: 2000000 kB
+SwapTotal: 2000000 kB
+SwapFree: 1900000 kB
+MEMINFO
+printf 'full avg60=0.00\n' >"$MEM_TEST/proc/pressure/memory"
+PATH="$MEM_TEST/bin:$PATH" bash "$MEM_TEST/sample"
+rg -q 'user.info.*available_kib=2000000' "$MEM_SAMPLE_OUTPUT" || fail "healthy sample did not log at info"
+printf 'full avg60=12.25\n' >"$MEM_TEST/proc/pressure/memory"
+PATH="$MEM_TEST/bin:$PATH" bash "$MEM_TEST/sample"
+rg -q 'user.warning.*psi_full_avg60=12.25' "$MEM_SAMPLE_OUTPUT" || fail "memory pressure did not trigger a warning"
+printf 'full avg60=0.00\n' >"$MEM_TEST/proc/pressure/memory"
+sed 's/MemAvailable: 2000000/MemAvailable: 400000/' "$MEM_TEST/proc/meminfo" >"$MEM_TEST/proc/low"
+mv "$MEM_TEST/proc/low" "$MEM_TEST/proc/meminfo"
+PATH="$MEM_TEST/bin:$PATH" bash "$MEM_TEST/sample"
+rg -q 'user.warning.*available_kib=400000' "$MEM_SAMPLE_OUTPUT" || fail "low available memory did not trigger a warning"
+
 printf 'Local preparation, sign-in, and pairing scenario passed.\n'

@@ -152,6 +152,20 @@ For direct maintenance, connect OpenVPN and then use the generated private alias
 ssh codex-on-vm-vpn
 ```
 
+## Memory protection
+
+VM preparation configures a 2 GiB swap file on the OS disk and a one-minute memory sampling timer. If another swap configuration exists, preparation stops for inspection. After an OS-disk replacement, run `scripts/codex-vm.sh setup` to restore the protection.
+
+Read recent samples and warnings on the VM:
+
+```bash
+journalctl -t codex-vm-memory --since "1 hour ago"
+systemctl status codex-vm-memory-sample.timer
+swapon --show
+```
+
+A warning indicates available memory below 15%, swap usage of at least 75%, or full memory pressure of at least 10% over one minute. Warnings stay in the VM journal; they do not send external notifications. Swap can reduce short spikes, but it cannot prevent overload from sustained demand.
+
 ## Repositories and VS Code
 
 Keep persistent repositories under `/home/azureadmin/projects`:

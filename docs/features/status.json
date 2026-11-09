@@ -1,0 +1,86 @@
+{
+  "version": 2,
+  "features": [
+    {
+      "id": "vm-memory-protection",
+      "feature_dir": "docs/features/vm-memory-protection",
+      "priority": 1,
+      "status": "done",
+      "owner": null,
+      "proof_run": "docs/features/vm-memory-protection/proof/runs/20261106T202205339203Z",
+      "notes": ""
+    },
+    {
+      "id": "codex-vm-operator-console",
+      "feature_dir": "docs/features/codex-vm-operator-console",
+      "priority": 2,
+      "status": "blocked",
+      "owner": null,
+      "proof_run": null,
+      "notes": "Historical package predates the status index; lifecycle evidence has not been migrated."
+    },
+    {
+      "id": "dot-codex-vm-bootstrap",
+      "feature_dir": "docs/features/dot-codex-vm-bootstrap",
+      "priority": 3,
+      "status": "blocked",
+      "owner": null,
+      "proof_run": null,
+      "notes": "Historical package predates the status index; lifecycle evidence has not been migrated."
+    },
+    {
+      "id": "mac-smb-key-lifecycle",
+      "feature_dir": "docs/features/mac-smb-key-lifecycle",
+      "priority": 4,
+      "status": "blocked",
+      "owner": null,
+      "proof_run": null,
+      "notes": "Historical package predates the status index; lifecycle evidence has not been migrated."
+    },
+    {
+      "id": "pinned-root-provisioning",
+      "feature_dir": "docs/features/pinned-root-provisioning",
+      "priority": 5,
+      "status": "blocked",
+      "owner": null,
+      "proof_run": null,
+      "notes": "Historical package predates the status index; lifecycle evidence has not been migrated."
+    },
+    {
+      "id": "remote-control-managed-workspace",
+      "feature_dir": "docs/features/remote-control-managed-workspace",
+      "priority": 6,
+      "status": "blocked",
+      "owner": null,
+      "proof_run": null,
+      "notes": "Historical package predates the status index; lifecycle evidence has not been migrated."
+    },
+    {
+      "id": "self-hosted-openvpn-access",
+      "feature_dir": "docs/features/self-hosted-openvpn-access",
+      "priority": 7,
+      "status": "blocked",
+      "owner": null,
+      "proof_run": null,
+      "notes": "Historical package predates the status index; lifecycle evidence has not been migrated."
+    },
+    {
+      "id": "storage-managed-identity",
+      "feature_dir": "docs/features/storage-managed-identity",
+      "priority": 8,
+      "status": "blocked",
+      "owner": null,
+      "proof_run": null,
+      "notes": "Historical package predates the status index; lifecycle evidence has not been migrated."
+    },
+    {
+      "id": "workspace-recovery",
+      "feature_dir": "docs/features/workspace-recovery",
+      "priority": 9,
+      "status": "blocked",
+      "owner": null,
+      "proof_run": null,
+      "notes": "Historical package predates the status index; lifecycle evidence has not been migrated."
+    }
+  ]
+}

@@ -3001,11 +3001,72 @@ finish_preparation() {
 [[ "$OPENVPN_SERVER_ADDRESS" =~ ^[0-9.]+$ ]] || fail "OpenVPN server address is invalid"
 [[ -z "$VM_ROOT" || "$TEST_MODE" == "1" ]] || fail "CODEX_VM_ROOT is available only in test mode"
 
+configure_memory_guard() {
+  local swapfile fstab
+  swapfile="$(root_path /swapfile-codex-vm)"
+  fstab="$(root_path /etc/fstab)"
+  write_if_changed 0755 "$(root_path /usr/local/sbin/codex-vm-memory-sample)" <<'SAMPLE'
+#!/usr/bin/env bash
+set -euo pipefail
+read -r total available swap_total swap_free < <(awk '
+  /^MemTotal:/ {total=$2} /^MemAvailable:/ {available=$2}
+  /^SwapTotal:/ {swap_total=$2} /^SwapFree:/ {swap_free=$2}
+  END {if (!total || available == "") exit 1; print total, available, swap_total+0, swap_free+0}
+' /proc/meminfo)
+pressure=$(awk '$1 == "full" {for (i=2;i<=NF;i++) if ($i ~ /^avg60=/) {sub(/^avg60=/,"",$i); print $i; exit}}' /proc/pressure/memory)
+if (( available * 100 < total * 15 || (swap_total > 0 && (swap_total-swap_free) * 100 >= swap_total * 75) )) || awk -v value="${pressure:-0}" 'BEGIN {exit !(value >= 10)}'; then
+  priority=warning
+else
+  priority=info
+fi
+logger -t codex-vm-memory -p "user.$priority" -- "available_kib=$available total_kib=$total swap_used_kib=$((swap_total-swap_free)) swap_total_kib=$swap_total psi_full_avg60=${pressure:-unavailable}"
+SAMPLE
+  write_if_changed 0644 "$(root_path /etc/systemd/system/codex-vm-memory-sample.service)" <<'SERVICE'
+[Unit]
+Description=Record VM memory pressure
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/codex-vm-memory-sample
+SERVICE
+  write_if_changed 0644 "$(root_path /etc/systemd/system/codex-vm-memory-sample.timer)" <<'TIMER'
+[Unit]
+Description=Sample VM memory every minute
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Unit=codex-vm-memory-sample.service
+[Install]
+WantedBy=timers.target
+TIMER
+  if [[ "$TEST_MODE" == 1 ]]; then return; fi
+  exec 8>/run/lock/codex-vm-swap.lock
+  flock -n 8 || fail "another swap setup is running"
+  if ! swapon --noheadings --show=NAME | grep -Fxq /swapfile-codex-vm; then
+    [[ ! -e "$swapfile" ]] || fail "inactive swap file already exists; inspect it before proceeding"
+    [[ -z "$(swapon --noheadings --show=NAME)" ]] || fail "another swap device is active"
+    if awk '$3 == "swap" { found=1 } END { exit !found }' "$fstab"; then
+      fail "another swap configuration exists"
+    fi
+    umask 077
+    if ! fallocate -l 2G "$swapfile" || ! chmod 600 "$swapfile" || ! mkswap "$swapfile" >/dev/null || ! swapon "$swapfile"; then
+      rm -f -- "$swapfile"
+      fail "could not create and activate swap"
+    fi
+  fi
+  if ! awk '$1 == "/swapfile-codex-vm" && $3 == "swap" { found=1 } END { exit !found }' "$fstab"; then
+    printf '\n# codex-on-vm memory reserve\n/swapfile-codex-vm none swap sw 0 0\n' >>"$fstab"
+  fi
+  systemctl daemon-reload
+  systemctl enable --now codex-vm-memory-sample.timer
+  systemctl start codex-vm-memory-sample.service
+}
+
 install_packages
 configure_apparmor
 prepare_workspace_disk
 restore_openvpn
 configure_runtime_files
+configure_memory_guard
 install_codex
 finish_preparation
 __CODEX_VM_HELPER_END__ prepare-codex-vm.sh

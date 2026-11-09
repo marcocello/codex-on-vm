@@ -24,3 +24,6 @@ docs/features/**/proof/runs/**
 
 # Local security register
 README.private.md
+
+# Feature status
+!docs/features/status.json
